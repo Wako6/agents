@@ -1,0 +1,49 @@
+model = "gpt-5.3-codex"
+model_reasoning_effort = "medium"
+personality = "pragmatic"
+
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = ["chrome-devtools-mcp@latest"]
+
+[features]
+multi_agent = true
+
+[agents.default]
+description = "POINT D’ENTRÉE (Main) / MANAGER GLOBAL: supervise tous les autres agents. Détecte si la stack est déjà documentée (STACK_SPEC/FLUTTER_STACK_SPEC), sinon demande l’analyse. Détecte si AGENT.md existe, sinon le crée. Centralise les règles. Demande une seule fois l’autorisation d’exécuter des commandes (docker/docker compose) puis n’insiste plus."
+config_file = "agents/manager.toml"
+
+# --- Agent 0 / Manager (entry point) ---
+[agents.manager]
+description = "Agent 0 (manager) for all projects: detects existing stack specs and AGENT.md, orchestrates the right specialized agents, consolidates outputs into repo-ready changes, and asks once per session for permission to run commands (especially docker/docker compose)."
+config_file = "agents/manager.toml"
+
+# --- Generic / existing agents ---
+[agents.code-base-analyst]
+description = "Analyze the provided codebase to infer the exact technical stack and produce STACK_SPEC.md. Evidence-driven, asks Engineer to validate and clarify ambiguities, identifies private modules and requests their docs."
+config_file = "agents/code-base-analyst.toml"
+
+[agents.frontend-reviewer-analyst]
+description = "End-to-end frontend integration reviewer using MCP chrome-devtools. Tests real-user behavior, UI consistency, responsiveness (desktop/mobile), widgets, and accessibility. Uses STACK_SPEC.md context. Outputs a numbered issue report with severities for fix agents."
+config_file = "agents/frontend-reviewer-analyst.toml"
+
+[agents.spip-developer]
+description = "SPIP specialist: assists the Engineer to build and maintain SPIP sites, templates (squelettes), plugins, and modules. Produces SPIP-conform code (paquet.xml, pipelines, CVT forms, loops/tags), with security, performance, and upgrade-safe practices."
+config_file = "agents/spip-developer.toml"
+
+[agents.django-reviewer-analyst]
+description = "Django backend reviewer: performs deep API and code quality audits using curl and CLI tools. Evaluates security, reliability, maintainability, clean code, pylint/flake8 compliance, and test coverage. Produces a structured Django engineering report."
+config_file = "agents/django-reviewer-analyst.toml"
+
+# --- Flutter agents ---
+[agents.flutter-analyst]
+description = "Flutter analyst (stack + architecture): infers Flutter/Dart/tooling/platform setup with evidence and produces FLUTTER_STACK_SPEC.md + FLUTTER_ARCH_REVIEW.md. Flags risks (state mgmt, navigation, error handling, perf, testability) and asks targeted questions when uncertain."
+config_file = "agents/flutter-analyst.toml"
+
+[agents.flutter-developer]
+description = "Flutter developer: implements features/fixes with production-ready Flutter/Dart code aligned with repo conventions (state mgmt, navigation, DI, networking, persistence, i18n, accessibility). Prefers patch/diff output and includes run/test verification steps."
+config_file = "agents/flutter-developer.toml"
+
+[agents.flutter-reviewer-analyst]
+description = "Flutter reviewer: deep code review/audit for correctness, async safety, architecture fit, performance, accessibility, and testing discipline. Produces FLUTTER_REVIEW_REPORT.md with evidence and actionable fixes."
+config_file = "agents/flutter-reviewer-analyst.toml"
