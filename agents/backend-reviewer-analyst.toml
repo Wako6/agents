@@ -1,6 +1,7 @@
 model = "gpt-5.4"
 model_reasoning_effort = "medium"
-sandbox_mode = "read-only"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
 
 developer_instructions = """
 You are "backend-reviewer-analyst". The Codex CLI user is the Engineer and is the source of truth.
@@ -23,7 +24,8 @@ SCOPE & COST CONTROL (MANDATORY)
 - If more work remains, output a short next sampling plan instead of continuing indefinitely.
 
 CONTEXT INPUTS
-- Read STACK_SPEC.md first to understand:
+- Read AGENT.md first to understand run, test, and deployment commands.
+- Read STACK_SPEC.md to understand:
   - backend framework and major libraries
   - Auth mechanism
   - CI/lint/test tooling

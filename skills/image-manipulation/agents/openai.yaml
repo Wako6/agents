@@ -1,0 +1,4 @@
+interface:
+  display_name: "Image Manipulation"
+  short_description: "Crop, resize, convert and generate thumbnails"
+  default_prompt: "Use $image-manipulation to prepare images before inserting them into the project."

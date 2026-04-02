@@ -1,0 +1,4 @@
+prefix_rule(pattern=["curl", "-s", "http://127.0.0.1:9222/json/version"], decision="allow")
+prefix_rule(pattern=["google-chrome", "--remote-debugging-port=9222", "--user-data-dir=/tmp/test", "--no-first-run"], decision="allow")
+prefix_rule(pattern=["docker", "compose", "exec", "-u", "user", "app", "python", "manage.py", "test"], decision="allow")
+prefix_rule(pattern=["docker", "compose", "exec", "-u", "user", "app", "python", "manage.py", "makemigrations"], decision="allow")
