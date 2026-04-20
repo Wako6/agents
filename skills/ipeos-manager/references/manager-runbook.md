@@ -1,12 +1,22 @@
 # IPEOS Manager Runbook
 
+> Top-level controller only. If you are a spawned sub-agent, stop reading this runbook — execute your own scoped assignment and return. Orchestration is the main conversation's job.
+
+## Companion references (load on demand)
+
+Do not load these unless the phase needs them — keep the context lean.
+
+- `references/work-items.md` — WI ID reservation, BSLUG, collision protocol, formats for `WORK_ITEMS.md`, `INDEX.md`, `WI_COUNTER.lock`, role memory notes, `REPO_STATE.md` fields, `AGENT.md` role.
+- `references/rules-wiki.md` — `ai_rules/` structure, entry template, write policy, 90-day review, first-contact migration. `rules-curator` is the only writer.
+- `references/review-triage.md` — procedure after a deep reviewer (frontend or backend) completes.
+
 ## Mission
 
 Run an AI engineering team instead of implementing directly.
 
 For every request:
 
-1. Recover context fast from repository memory and living docs.
+1. Recover context fast from repository memory and the rules wiki.
 2. Open a unique work item and keep its state explicit.
 3. Assign the right agents with clear scope, ownership, and verification paths.
 4. Keep coordination tight so agents do not duplicate work or lose context.
@@ -28,10 +38,11 @@ Read in this order, stopping when context is sufficient for the current tier:
 
 1. `ai_memory/REPO_STATE.md`
 2. `ai_memory/WI_COUNTER.lock`
-3. `ai_memory/WORK_ITEMS.md` for medium or complex work
-4. Recent `ai_memory/YYYY-MM-DD__ROLE-*.md` for related prior work
-5. `AGENT.md` if commands are missing from `REPO_STATE.md`
-6. `STACK_SPEC.md` if stack context affects routing
+3. `ai_rules/INDEX.md` — durable project rules and decisions; open the topic files targeted by the task
+4. `ai_memory/WORK_ITEMS.md` for medium or complex work
+5. Recent `ai_memory/YYYY-MM-DD__ROLE-*.md` only if a specific prior WI is directly relevant (avoid systematic re-reads — curated knowledge lives in `ai_rules/`)
+6. `AGENT.md` if commands are missing from `REPO_STATE.md`
+7. `STACK_SPEC.md` if stack context affects routing
 
 Answer before proceeding:
 
@@ -39,6 +50,8 @@ Answer before proceeding:
 - What is the complexity tier?
 - Does TOA preflight need to run?
 - Has `stack_spec_hash` changed?
+- First contact with this project, OR `REPO_STATE.md` still carries `known_pitfalls` / `latest_decisions`? Queue a `rules-curator` migration pass (see `rules-wiki.md`).
+- Any `ai_rules/` entries with `Verified:` older than 90 days? Queue a `rules-curator` review pass.
 
 ## Stack Analysis Trigger
 
@@ -51,42 +64,9 @@ Trigger `code-base-analyst` only when one of these is true:
 
 Relevant manifest files: `package.json`, `requirements.txt`, `Dockerfile`, `pyproject.toml`, `composer.json`.
 
-## Unique Work Item ID
+## Work Item reservation
 
-Format: `WI-YYYYMMDD-<BSLUG>-###`
-
-`BSLUG` comes from the current git branch:
-
-1. Run `git rev-parse --abbrev-ref HEAD`
-2. Strip common prefixes such as `feature/`, `feat/`, `fix/`, `hotfix/`, `bugfix/`, `release/`
-3. Keep only alphanumeric characters, take the first 6 chars, uppercase
-4. If git is unavailable, use `NONGIT`
-
-Examples:
-
-- `main` -> `MAIN`
-- `feature/fix-auth` -> `FIXAUT`
-- `fix/WI-123` -> `WI123`
-
-### Collision-safe protocol
-
-1. Derive `BSLUG`
-2. Read `ai_memory/WI_COUNTER.lock`
-3. Find the line `BSLUG=WI-YYYYMMDD-BSLUG-###`
-4. If the stored date is today, increment the sequence
-5. Otherwise start at `001`
-6. Upsert the line immediately before any delegation
-7. If `WI_COUNTER.lock` is missing, scan `ai_memory/WORK_ITEMS.md` and `ai_doc/` for the highest existing ID for that branch slug, create the lock file, then continue
-
-Reserve the ID in `ai_memory/WORK_ITEMS.md` with:
-
-- Work Item ID
-- Date/Time
-- Short Title
-- Status = `OPEN`
-- TOA
-- Primary Executor
-- attempt_count = `0`
+Always reserve a unique WI ID before any delegation. Format, BSLUG derivation, collision-safe protocol, and reservation entry live in `references/work-items.md`. Load that file on first reservation of the session or whenever in doubt.
 
 If uniqueness cannot be verified, stop and mark `BLOCKED`.
 
@@ -102,12 +82,17 @@ Default roles:
 - `verifier`: run tests mechanically and report PASS or FAIL
 - `frontend-reviewer-analyst`: expensive browser-level audit
 - `backend-reviewer-analyst`: expensive backend/API audit
+- `rules-curator`: sole writer of `ai_rules/`. Invoked for first-contact migration, closure triage of `Proposed Rules`, or 90-day re-verification. Never invoked for general development.
 
-Use deep reviewers only when:
+Use deep reviewers (`frontend-reviewer-analyst`, `backend-reviewer-analyst`) only when at least one of the following is true:
 
-- The user explicitly requests a deep review
-- The change is high-risk
-- The change spans multiple modules or integration boundaries
+- The user explicitly requests a deep review.
+- The change crosses a security, auth, or data-integrity boundary.
+- A prior incident or review flagged recurring risk on this surface.
+- The change modifies a public API contract.
+- The change is UI/UX-facing and the user flagged UX or accessibility risk.
+
+Do NOT call a deep reviewer just because the task is classified `complex`. Complexity alone is not a trigger — rely on developer tests (and `verifier` when warranted, see below) as the default quality gate.
 
 ## Validation Gates
 
@@ -129,9 +114,17 @@ Rules:
 
 ## Default Execution Flow
 
-- `simple`: developer or devops -> verifier -> TOA closure
-- `medium`: optional TOA preflight -> optional solution architect -> developer or devops -> verifier -> TOA closure
-- `complex`: TOA preflight -> optional code-base-analyst -> optional solution-architect -> developer or devops -> verifier -> optional deep reviewer -> manager triage -> follow-up work items -> TOA closure
+- `simple`: developer or devops -> TOA closure. Skip `verifier` by default; trust the developer's in-context test run.
+- `medium`: optional TOA preflight -> optional solution-architect -> developer or devops -> optional `verifier` -> TOA closure.
+- `complex`: TOA preflight -> optional code-base-analyst -> optional solution-architect -> developer or devops -> `verifier` (required) -> optional deep reviewer -> manager triage -> follow-up work items -> TOA closure.
+
+At closure, if any role note for the WI contains a `Proposed Rules` section, invoke `rules-curator` in `triage` mode BEFORE marking the WI `DONE`. See `rules-wiki.md` for the brief format.
+
+`verifier` policy:
+
+- At tier `simple`, skip by default. The developer already ran the documented test and lint commands; their evidence in the role memory note is sufficient.
+- At tier `medium`, delegate to `verifier` only when an independent re-run genuinely reduces risk: cross-module change, known flaky suite, CI-parity concern, developer-reported instability, or explicit user request.
+- At tier `complex`, `verifier` is required — the independent-context re-run is worth the cost at this scope.
 
 Trigger `solution-architect` when:
 
@@ -141,20 +134,16 @@ Trigger `solution-architect` when:
 - The user asks for the best solution or an analysis
 - A prior developer attempt failed and the cause is unclear
 
+Before delegating, check for an existing analysis that covers the current scope:
+
+- if a Work Item ID is known: `ls ai_doc/ANALYSIS__<WI-ID>__*.md` — a single direct lookup.
+- otherwise: scan `ai_memory/INDEX.md` for `ANALYSIS | ... | <short title>` pointers matching the topic, or `ls ai_doc/ANALYSIS__*.md` by topic slug.
+
+If an analysis covers the current scope and the stack has not changed since, reuse it — link it in the work item and brief the developer from it instead of re-running `solution-architect`.
+
 ## Review Triage
 
-After a deep reviewer completes, read the produced report and triage every issue:
-
-- Blocker or Critical: create a new work item immediately and delegate to `developer`
-- Major: create a new work item, record it as `OPEN`, inform the user
-- Minor or Trivial: record it in backlog in `WORK_ITEMS.md`
-
-Then summarize:
-
-- number of issues by severity
-- created work items and IDs
-- backlog items recorded
-- whether the parent work item can still be closed
+When a deep reviewer returns a report, load `references/review-triage.md` and follow its procedure. That file also covers when a reviewer-flagged systemic issue should be routed back through the `Proposed Rules` path instead of being curated directly.
 
 ## Circuit Breakers
 
@@ -162,76 +151,24 @@ Then summarize:
 - If `attempt_count >= 3`, mark `ESCALATED`, stop delegation, present history and evidence, and wait for user direction
 - If a work item stays `BLOCKED` for more than 48h, mark `STALE` and present one recommended action
 
-## Required Repository Memory
+## Required Repository Memory (ownership map)
 
-### `AGENT.md`
+Formats and fields live in `references/work-items.md`. Summary of ownership:
 
-Keep run, test, lint, startup, shutdown, and environment instructions accurate.
-
-### `ai_memory/REPO_STATE.md`
-
-Maintain:
-
-- `project_purpose`
-- `run_commands`
-- `test_commands`
-- `lint_commands`
-- `last_toa_run`
-- `stack_spec_hash`
-- `active_work_items`
-- `known_pitfalls`
-- `latest_decisions`
-- `blocking_questions`
-
-### `ai_memory/WORK_ITEMS.md`
-
-Use as the main ledger. Keep status, attempt count, owners, memory links, and pending clarifications current.
-
-### `ai_memory/WI_COUNTER.lock`
-
-One line per branch slug:
-
-```text
-MAIN=WI-20260325-MAIN-004
-FIXAUT=WI-20260325-FIXAUT-001
-FEATPA=WI-20260324-FEATPA-002
-```
-
-### `ai_memory/INDEX.md`
-
-Maintain one searchable line per work item:
-
-```text
-WI-YYYYMMDD-BSLUG-### | Short Title | Status | Roles | Note path(s)
-```
-
-### Role Memory Notes
-
-Path format:
-
-```text
-ai_memory/YYYY-MM-DD__ROLE-<ROLE>__WI-YYYYMMDD-BSLUG-###.md
-```
-
-Required fields:
-
-- Work Item
-- Role
-- Status
-- Scope
-- Files Touched
-- Evidence
-- Decisions
-- Open Blockers
-- Next Actions
-- Recall Hints
-
-Archive DONE notes older than 7 days to `ai_memory/archive/`.
+- `AGENT.md` — reading map at repo root. Owned by TOA.
+- `ai_memory/REPO_STATE.md` — live operational state. Owned by TOA.
+- `ai_memory/WORK_ITEMS.md` — ledger. Owned by manager.
+- `ai_memory/WI_COUNTER.lock` — ID counter. Owned by manager.
+- `ai_memory/INDEX.md` — WI and analysis index. Owned by manager.
+- `ai_memory/YYYY-MM-DD__ROLE-*__WI-*.md` — role notes. Owned by each role.
+- `ai_rules/*` — durable knowledge. Sole writer: `rules-curator` (invoked by manager).
 
 ## Documentation Policy
 
 - AI-generated reports, audits, and runbooks go in `ai_doc/`
+- `ai_doc/archive/` holds AI artifacts older than 30 days; the manager invokes `rules-curator` to extract any durable rules into `ai_rules/` BEFORE `memory-cleaner` moves files into the archive
 - `AGENT.md`, `STACK_SPEC.md`, and `ARCHITECTURE.md` stay at repo root
+- `AGENT.md` is a reading map: run/test/lint commands plus pointers to `ai_rules/INDEX.md` and `STACK_SPEC.md`. Do NOT duplicate durable rules inside `AGENT.md` — link to them instead.
 - If AI docs are elsewhere, move them or update references
 
 ## Communication Standard
@@ -268,11 +205,12 @@ When `BLOCKED`, provide one blocker, one best hypothesis, and one recommended ne
 A work item is `DONE` only when all of these are true:
 
 - execution evidence exists in a role memory note
-- `verifier` ran and passed, or the waiver is written
+- test evidence is present: for `complex`, `verifier` ran and passed; for `simple` and `medium`, the developer's test-run output recorded in their role note is sufficient — unless the manager explicitly flagged verification risk, in which case `verifier` must run and pass
 - impacted docs were updated
 - `ai_memory/WORK_ITEMS.md` is current
 - `ai_memory/REPO_STATE.md` is current
 - `ai_memory/WI_COUNTER.lock` is current
 - `ai_memory/INDEX.md` is updated
+- if any role note for this WI contained a `Proposed Rules` section, `rules-curator` ran in `triage` mode and its decisions (ACCEPT / AMEND / MERGE / REJECT / DEPRECATE) are recorded in the WI closure
 - each contributing role wrote its note
 - TOA closure ran

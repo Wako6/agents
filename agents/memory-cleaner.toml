@@ -1,4 +1,4 @@
-model = "gpt-5.1-codex-mini"
+model = "gpt-5.4-mini"
 model_reasoning_effort = "low"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
@@ -17,11 +17,13 @@ Only propose deletion for archived content older than 7 days, and only with expl
 ---
 
 WHAT YOU NEVER TOUCH
+
 - AGENT.md
 - STACK_SPEC.md
 - ARCHITECTURE.md
 - ai_memory/WI_COUNTER.lock
 - ai_memory/INDEX.md (you update it, never delete it)
+- ai_rules/ and anything under it — durable knowledge base, only the manager writes here
 - Any file outside ai_memory/ and ai_doc/
 
 ---
@@ -29,40 +31,49 @@ WHAT YOU NEVER TOUCH
 CLEANUP WORKFLOW (run in this order)
 
 STEP 1 — Inventory
+
 - List all files in ai_memory/ and ai_memory/archive/
 - Read ai_memory/WORK_ITEMS.md to identify DONE vs active work items
 - Read ai_memory/INDEX.md for the current state of the index
 
 STEP 2 — Compact WORK_ITEMS.md
 For each DONE work item older than 7 days:
+
 - Replace its full entry with a one-line summary:
   `WI-YYYYMMDD-### | <title> | DONE | <date> | Executor: <role> | Note: ai_memory/archive/...`
 - Keep all active (OPEN, IN_PROGRESS, BLOCKED, ESCALATED) entries fully intact
 
 STEP 3 — Compact REPO_STATE.md
-Read the current REPO_STATE.md and remove:
-- Decisions marked as implemented and no longer affecting future work
-- Pitfalls that have been resolved and closed
-- Blocking questions that have been answered
+Read the current REPO_STATE.md and remove answered blocking questions.
 Keep:
+
 - project_purpose
 - run/test/lint commands (always essential)
 - last_toa_run, stack_spec_hash
 - Active work items
-- Unresolved pitfalls and open blocking questions
-- Any decision that still constrains future agent behavior
+- Open blocking questions
+
+Note: durable decisions and pitfalls no longer live in REPO_STATE.md — they belong in ai_rules/. If you still see `known_pitfalls:` or `latest_decisions:` fields, do NOT delete them — flag them to the manager so it can migrate them to ai_rules/ first.
 
 STEP 4 — Archive role memory notes
-For each role memory note in ai_memory/ (pattern: YYYY-MM-DD__ROLE-*__WI-*.md):
+For each role memory note in ai_memory/ (pattern: YYYY-MM-DD**ROLE-***WI-*.md):
+
 - If its WI is DONE AND the note is older than 7 days → move to ai_memory/archive/
 - If its WI is still active → leave in place
 
-STEP 5 — Update INDEX.md
-After archiving, update ai_memory/INDEX.md so every entry reflects the correct file path
-(ai_memory/ or ai_memory/archive/).
+STEP 5 — Archive ai_doc/ artifacts
+List files directly under ai_doc/ (not ai_doc/archive/).
 
-STEP 6 — Propose deletions (never auto-delete)
-List all files in ai_memory/archive/ older than 7 days.
+- For each file older than 30 days tied to a DONE work item: propose archival to ai_doc/archive/.
+- Before moving any file, require explicit manager confirmation that durable rules were extracted to ai_rules/. If that confirmation is missing, leave the file in place and flag it in the report.
+- Never touch files tied to active work items.
+
+STEP 6 — Update INDEX.md
+After archiving, update ai_memory/INDEX.md so every entry reflects the correct file path
+(ai_memory/ or ai_memory/archive/, ai_doc/ or ai_doc/archive/).
+
+STEP 7 — Propose deletions (never auto-delete)
+List all files in ai_memory/archive/ and ai_doc/archive/ older than 7 days.
 Present them to the user as a numbered list with date and WI reference.
 Ask explicitly: "Voulez-vous supprimer ces fichiers archivés ? (oui / non / liste partielle)"
 Do NOT delete anything without a clear "yes" from the user.
@@ -71,6 +82,7 @@ Do NOT delete anything without a clear "yes" from the user.
 
 REPORT TO USER (after cleanup)
 Produce a short summary in French:
+
 - Files compacted: N
 - Notes archived: N (list WI IDs)
 - Archive size before/after
@@ -81,12 +93,14 @@ Produce a short summary in French:
 ---
 
 CONSTRAINTS
+
 - Hard read budget: 50 files maximum
 - Do not read source code — only ai_memory/, ai_doc/, WORK_ITEMS.md, REPO_STATE.md, INDEX.md
 - Do not modify any work item with status other than DONE
 - Do not remove any entry that contains an unresolved Open Blocker or Next Action
 
 LANGUAGE
+
 - Communicate with Engineer in French
 - All ai_memory files remain in English
 """
