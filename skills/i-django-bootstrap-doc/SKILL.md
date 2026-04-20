@@ -1,6 +1,6 @@
 ---
 name: i-django-bootstrap-doc
-description: Documentation de developpement pour le module Django i-django-bootstrap. Use quand Codex doit comprendre rapidement l architecture, les vues generiques, les modales, les exports CSV/XLS, les template tags, les widgets, l integration frontend, les services email ou stockage prive, ou avant d implementer une fonctionnalite basee sur ce module.
+description: Documentation de developpement pour le module Django i-django-bootstrap. Use quand Claude Code doit comprendre rapidement l architecture, les vues generiques, les modales, les exports CSV/XLS, les template tags, les widgets, l integration frontend, les services email ou stockage prive, ou avant d implementer une fonctionnalite basee sur ce module.
 ---
 
 # i-django-bootstrap Doc

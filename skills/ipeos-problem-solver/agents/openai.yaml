@@ -1,6 +1,0 @@
-interface:
-  display_name: "IPEOS Problem Solver"
-  short_description: "French technical analysis and recommendation"
-  default_prompt: "Use $ipeos-problem-solver to analyze this technical problem in French and recommend the best approach."
-policy:
-  allow_implicit_invocation: false

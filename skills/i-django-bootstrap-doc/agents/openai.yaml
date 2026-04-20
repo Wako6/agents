@@ -1,4 +1,0 @@
-interface:
-  display_name: "i-django-bootstrap Doc"
-  short_description: "Doc technique du module i-django-bootstrap"
-  default_prompt: "Use $i-django-bootstrap-doc to retrouver la documentation utile avant de developper avec i-django-bootstrap."
