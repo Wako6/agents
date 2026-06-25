@@ -1,3 +1,4 @@
+name = "flutter-reviewer-analyst"
 model = "gpt-5.3-codex"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"

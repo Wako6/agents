@@ -1,6 +1,0 @@
-interface:
-  display_name: "IPEOS Memory Clean"
-  short_description: "Compact and archive IPEOS repo memory"
-  default_prompt: "Use $ipeos-memory-clean to compact ai_memory, archive old notes, and prepare any archive deletions for confirmation."
-policy:
-  allow_implicit_invocation: false

@@ -1,15 +1,15 @@
 ---
-name: ipeos-memory-clean
-description: "Safe compaction and archival of IPEOS repository memory (ai_memory/) via the memory-cleaner sub-agent. Invoke at the top level of the main conversation when the user asks to clean, compact, archive, trim, prune, purge, or do housekeeping on project memory — French triggers: 'nettoyer la mémoire', 'faire le ménage', 'compacter ai_memory', 'archiver les work items', 'mémoire pleine', 'purge la mémoire', 'nettoyage projet'; English triggers: 'clean memory', 'clean up ai_memory', 'compact memory', 'archive old work items', 'prune memory', 'memory cleanup', 'housekeeping on ai_memory'. Also invoke when the user flags that ai_memory/ has grown large, has many stale DONE entries, or needs maintenance before a new phase. Force mode (irreversible operations) activates when the request contains the word 'force'. MUST NEVER run inside a spawned sub-agent."
+name: project-memory-clean
+description: "Safe compaction and archival of repository memory (ai_memory/) via the memory-cleaner sub-agent. Invoke at the top level of the main conversation when the user asks to clean, compact, archive, trim, prune, purge, or do housekeeping on project memory — French triggers: 'nettoyer la mémoire', 'faire le ménage', 'compacter ai_memory', 'archiver les work items', 'mémoire pleine', 'purge la mémoire', 'nettoyage projet'; English triggers: 'clean memory', 'clean up ai_memory', 'compact memory', 'archive old work items', 'prune memory', 'memory cleanup', 'housekeeping on ai_memory'. Also invoke when the user flags that ai_memory/ has grown large, has many stale DONE entries, or needs maintenance before a new phase. Force mode (irreversible operations) activates when the request contains the word 'force'. MUST NEVER run inside a spawned sub-agent."
 ---
 
-# IPEOS Memory Clean
+# Project Memory Clean
 
 Use this skill for repository memory maintenance only. It is not a hook for normal dev work and must not run automatically at the end of features, bug fixes, PRs, or releases — the user decides when to clean.
 
 ## Cascade Guard
 
-This skill runs ONLY at the top level of the main Claude Code conversation.
+This skill runs ONLY at the top level of the main Codex conversation.
 
 - If you are a spawned sub-agent, do NOT invoke this skill. `memory-cleaner` itself must be launched by the top-level controller, never by another sub-agent.
 - Sub-agents report memory growth or staleness to the caller; they do not delegate cleaning.
@@ -26,7 +26,7 @@ Activate when any of these is true at the top level:
 
 Do not activate when:
 
-- The user is starting or running a dev task, PR, or release (that is `ipeos-manager`).
+- The user is starting or running a dev task, PR, or release (that is `project-manager`).
 - The user only asks to read, inspect, or list memory contents (answer directly).
 - You are running as a spawned sub-agent.
 

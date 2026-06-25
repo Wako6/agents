@@ -67,7 +67,7 @@ One searchable line per work item:
 WI-YYYYMMDD-BSLUG-### | Short Title | Status | Roles | Note path(s)
 ```
 
-Also hosts analysis pointers emitted by `ipeos-problem-solver`:
+Also hosts analysis pointers emitted by `project-problem-solver`:
 
 ```text
 ANALYSIS | <WI-ID or n/a> | ai_doc/ANALYSIS__<WI-ID>__<slug>.md | <short title>

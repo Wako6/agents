@@ -1,9 +1,9 @@
 ---
-name: ipeos-problem-solver
+name: project-problem-solver
 description: "Structured French-language problem analysis before coding. Use at top level for technical choices, ambiguity, tradeoffs, architecture, performance, security, migrations, or failed attempts with unclear root cause. QUICK mode answers inline; DEEP mode delegates to `solution-architect` and persists a reusable analysis in `ai_doc/`. Never run inside a spawned sub-agent."
 ---
 
-# IPEOS Problem Solver
+# Project Problem Solver
 
 Respond in French. Analyze before recommending.
 
@@ -11,7 +11,7 @@ Do not write code — produce a reasoned analysis the developer or the orchestra
 
 ## Cascade Guard
 
-This skill runs ONLY at the top level of the main Claude Code conversation.
+This skill runs ONLY at the top level of the main Codex conversation.
 
 - If you are a spawned sub-agent (developer, explorer, solution-architect, devops-engineer, etc.), do NOT invoke this skill. Solution design is either already done by the top-level controller or delegated to the `solution-architect` agent.
 - Sub-agents that feel they lack design guidance must stop and return the ambiguity to the caller, not re-enter this skill.
@@ -29,7 +29,7 @@ Activate at the top level when any of these is true:
 Do not activate when:
 
 - The task is unambiguous and mechanical (rename, typo fix, straightforward feature with a clear path).
-- The user asks a pure factual or documentation question (answer directly, use `find-docs` if a library is involved).
+- The user asks a pure factual or documentation question (answer directly; use `ctx7` when a library, framework, SDK, API, CLI tool, or cloud service is involved).
 - The user is mid-implementation and just needs the next line of code.
 - You are running as a spawned sub-agent.
 
@@ -104,7 +104,7 @@ When `solution-architect` returns:
   ANALYSIS | <WI-ID or n/a> | ai_doc/ANALYSIS__<WI-ID>__<slug>.md | <short title>
   ```
 
-- do NOT mutate `ai_memory/WORK_ITEMS.md` — that file is owned by `ipeos-manager`. If a work item is active, the manager links the document in the work item itself.
+- do NOT mutate `ai_memory/WORK_ITEMS.md` — that file is owned by `project-manager`. If a work item is active, the manager links the document in the work item itself.
 
 ## Recommendation Rules — both modes
 
@@ -117,7 +117,7 @@ When `solution-architect` returns:
 
 ## Project Context
 
-In an IPEOS repository, both modes read or reference:
+In a repository using this multi-agent workflow, both modes read or reference:
 
 - `ai_memory/REPO_STATE.md`
 - `STACK_SPEC.md`

@@ -47,7 +47,7 @@ WORKFLOW
      - Collect manifest files: package.json, requirements*.txt, Dockerfile*, docker-compose*.yml, pyproject.toml, composer.json, Gemfile, go.mod (whichever exist)
      - Hash = concatenation of their filenames + first non-empty line of each (simple, reproducible)
    - Write this hash to ai_memory/REPO_STATE.md under the field `stack_spec_hash`.
-   - This hash is the staleness gate used by IPEOS Manager to decide whether to re-trigger analysis.
+   - This hash is the staleness gate used by the project manager to decide whether to re-trigger analysis.
 5. Validation gate (lightweight)
    - Before finalizing, surface:
      - a short stack summary

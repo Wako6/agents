@@ -1,6 +1,0 @@
-interface:
-  display_name: "IPEOS Manager"
-  short_description: "Project controller and orchestration mode"
-  default_prompt: "Use $ipeos-manager to run the IPEOS project in orchestration mode with explicit work items and delegation gates."
-policy:
-  allow_implicit_invocation: false

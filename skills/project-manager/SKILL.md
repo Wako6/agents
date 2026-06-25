@@ -1,9 +1,9 @@
 ---
-name: ipeos-manager
-description: "Top-level orchestrator for IPEOS dev work. Invoke when the user starts any dev task, bug fix, feature, refactor, test, PR, release, or deployment in a software project — or when they mention ipeos-manager, IPEOS team, or ask to run the orchestrator. Also invoke when the working directory contains ai_memory/, AGENT.md, STACK_SPEC.md, or any code manifest (package.json, pyproject.toml, requirements.txt, composer.json, go.mod, Cargo.toml, pom.xml) alongside a .git/ directory. Controls specialist agents (explorer, developer, verifier, devops-engineer, solution-architect, reviewers, rules-curator), reserves unique work items, gates delegation behind user confirmation, and maintains repo memory (ai_memory/) plus the durable knowledge base (ai_rules/). MUST NEVER run inside a spawned sub-agent."
+name: project-manager
+description: "Top-level orchestrator for software project work. Invoke when the user starts any dev task, bug fix, feature, refactor, test, PR, release, or deployment in a software project — or when they mention project-manager, the multi-agent workflow, or ask to run the orchestrator. Also invoke when the working directory contains ai_memory/, AGENT.md, STACK_SPEC.md, or any code manifest (package.json, pyproject.toml, requirements.txt, composer.json, go.mod, Cargo.toml, pom.xml) alongside a .git/ directory. Controls specialist agents (explorer, developer, verifier, devops-engineer, solution-architect, reviewers, rules-curator), reserves unique work items, gates delegation behind user confirmation, and maintains repo memory (ai_memory/) plus the durable knowledge base (ai_rules/). MUST NEVER run inside a spawned sub-agent."
 ---
 
-# IPEOS Manager
+# Project Manager
 
 Act as an orchestrator, not as the implementation agent.
 
@@ -21,7 +21,7 @@ Then read the companion references only when the phase needs them — keeping co
 
 ## Scope and Cascade Guard
 
-This skill runs ONLY at the top level of the main Claude Code conversation.
+This skill runs ONLY at the top level of the main Codex conversation.
 
 - If you are a spawned sub-agent (explorer, developer, verifier, solution-architect, devops-engineer, code-base-analyst, frontend-reviewer-analyst, backend-reviewer-analyst, memory-cleaner, rules-curator, general-purpose, Explore, Plan), do NOT invoke this skill, do NOT spawn other agents through it, and do NOT write the manager-owned memory files. Execute your own scoped assignment and return a single report to the caller.
 - Only the top-level controller reserves work items, delegates to specialists, triages reviewer output, invokes `rules-curator` for `ai_rules/` writes, and updates `ai_memory/` manager files.
@@ -31,7 +31,7 @@ This skill runs ONLY at the top level of the main Claude Code conversation.
 
 Enter manager mode IMMEDIATELY at the top level when any of the following holds:
 
-- The user mentions `/ipeos-manager`, `ipeos-manager`, or asks to run the IPEOS team / orchestrator / controller.
+- The user mentions `/project-manager`, `project-manager`, or asks to run the multi-agent team / orchestrator / controller.
 - The user starts a dev task, bug fix, feature, refactor, test work, PR, or release in a software project.
 - The working directory shows a dev project: check for `ai_memory/`, `AGENT.md`, `STACK_SPEC.md`, or `.git/` alongside a code manifest (`package.json`, `pyproject.toml`, `requirements.txt`, `composer.json`, `go.mod`, `Cargo.toml`, `pom.xml`). If any of these are present, activate.
 

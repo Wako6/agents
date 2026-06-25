@@ -1,4 +1,4 @@
-# IPEOS Manager Runbook
+# Project Manager Runbook
 
 > Top-level controller only. If you are a spawned sub-agent, stop reading this runbook — execute your own scoped assignment and return. Orchestration is the main conversation's job.
 

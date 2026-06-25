@@ -1,0 +1,23 @@
+.tmp/
+tmp/
+shell_snapshots/
+
+# Local Codex state and logs
+auth.json
+installation_id
+history.jsonl
+models_cache.json
+log/
+sessions/
+cache/codex_app_directory/
+cache/codex_apps_server_info/
+cache/codex_apps_tools/
+
+# Local databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Installed/generated runtime artifacts
+packages/standalone/
+plugins/cache/

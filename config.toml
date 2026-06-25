@@ -1,4 +1,4 @@
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "medium"
 personality = "pragmatic"
 approval_policy = "on-request"
@@ -7,70 +7,7 @@ sandbox_mode = "workspace-write"
 [sandbox_workspace_write]
 network_access = true
 
-[projects."/home/laurent/dev/tmp/biblefleche"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/dashboard-fredon"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/dockers/build-zimbra"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/scripts/api-mail"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/zimbra-admin"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/reactnative/biblefleche"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/apps/i-django-bootstrap"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/apps/i-django-account"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/oi-software/venv/src/oiconnect"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/reactnative/gwap"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/karucanne"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/dockers/demarches-simplifiees"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/spip/ipeos_com/data/app/plugins/itemplate-ipeoscom"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/spip/ipeos_com/data/app/plugins/i-chatbot"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/i-django-rag-collector"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/dpo-connect"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/oi-software"]
-trust_level = "trusted"
-
-[projects."/home/laurent/.codex"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/dockers/humhub-ude-medef"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/django/marina-connect"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/tmp"]
-trust_level = "trusted"
-
-[projects."/home/laurent/dev/reactnative/lamentin-connect"]
+[projects."/home/sadolphe/.codex"]
 trust_level = "trusted"
 
 [notice]
@@ -80,6 +17,7 @@ hide_rate_limit_model_nudge = true
 [notice.model_migrations]
 "gpt-5.2" = "gpt-5.2-codex"
 "gpt-5.3-codex" = "gpt-5.4"
+"gpt-5.4" = "gpt-5.5"
 
 [mcp_servers.chrome-devtools]
 command = "npx"
@@ -112,44 +50,47 @@ url = "https://developers.openai.com/mcp"
 multi_agent = true
 
 [agents.memory-cleaner]
-description = "Memory maintenance specialist for IPEOS projects: clean, compact, and archive ai_memory/ directory so future sessions can resume fast. Never deletes without explicit user confirmation."
+description = "Memory maintenance specialist for repository memory: clean, compact, and archive ai_memory/ directory so future sessions can resume fast. Never deletes without explicit user confirmation."
 config_file = "agents/memory-cleaner.toml"
 
 [agents.explorer]
-description = "Technical Owner Agent (TOA) for IPEOS projects: repository discovery, architecture mapping, work item management, and repo memory maintenance. Runs preflight before any delegation, ensures resumability."
+description = "Technical Owner Agent (TOA) for multi-agent projects: repository discovery, architecture mapping, work item management, and repo memory maintenance. Runs preflight before any delegation, ensures resumability."
 config_file = "agents/explorer.toml"
 
 [agents.developer]
-description = "Implementation specialist in the IPEOS multi-agent team: write code, fix bugs, run tests, and refactor within a clearly scoped work item. Delegates to manager when blocked or out of scope."
+description = "Implementation specialist in the multi-agent workflow: write code, fix bugs, run tests, and refactor within a clearly scoped work item. Delegates to manager when blocked or out of scope."
 config_file = "agents/developer.toml"
 
 [agents.devops-engineer]
-description = "Infrastructure and delivery specialist in the IPEOS multi-agent team: Docker, CI/CD pipelines, environments, deployment configuration. Produces reliable, reproducible infrastructure changes with clear evidence."
+description = "Infrastructure and delivery specialist in the multi-agent workflow: Docker, CI/CD pipelines, environments, deployment configuration. Produces reliable, reproducible infrastructure changes with clear evidence."
 config_file = "agents/devops-engineer.toml"
 
 [agents.verifier]
-description = "Lightweight verification specialist in the IPEOS multi-agent team: run test suite and lint commands, report PASS/FAIL/BLOCKED with evidence. Fast and cheap — does not analyze code or suggest fixes."
+description = "Lightweight verification specialist in the multi-agent workflow: run test suite and lint commands, report PASS/FAIL/BLOCKED with evidence. Fast and cheap — does not analyze code or suggest fixes."
 config_file = "agents/verifier.toml"
 
 [agents.code-base-analyst]
-description = "Repository stack analyst for IPEOS projects: infer the real technical stack from the codebase and produce a reusable STACK_SPEC.md so other agents understand how the project is built, run, tested, and constrained."
+description = "Repository stack analyst for multi-agent projects: infer the real technical stack from the codebase and produce a reusable STACK_SPEC.md so other agents understand how the project is built, run, tested, and constrained."
 config_file = "agents/code-base-analyst.toml"
 
 [agents.frontend-reviewer-analyst]
-description = "Deep frontend auditor for IPEOS projects: UX, accessibility, runtime, and integration issues using chrome-devtools on a scoped URL or flow, produce a FRONTEND_REVIEW_REPORT.md with evidence."
+description = "Deep frontend auditor for multi-agent projects: UX, accessibility, runtime, and integration issues using chrome-devtools on a scoped URL or flow, produce a FRONTEND_REVIEW_REPORT.md with evidence."
 config_file = "agents/frontend-reviewer-analyst.toml"
 
 [agents.backend-reviewer-analyst]
-description = "Deep backend engineering auditor for IPEOS projects: validate behavior, audit security/correctness/reliability/maintainability/tests on a scoped module or API surface, produce a BACKEND_REVIEW_REPORT.md with evidence."
+description = "Deep backend engineering auditor for multi-agent projects: validate behavior, audit security/correctness/reliability/maintainability/tests on a scoped module or API surface, produce a BACKEND_REVIEW_REPORT.md with evidence."
 config_file = "agents/backend-reviewer-analyst.toml"
 
 [agents.solution-architect]
-description = "Spécialiste en analyse de problèmes et conception de solutions dans l'équipe IPEOS. Classe chaque demande en mode QUICK ou DEEP, benchmark les pratiques, compare les options, et produit un plan d'action concret pour le developer. Ne code pas."
+description = "Spécialiste en analyse de problèmes et conception de solutions dans le workflow multi-agent. Classe chaque demande en mode QUICK ou DEEP, benchmark les pratiques, compare les options, et produit un plan d'action concret pour le developer. Ne code pas."
 config_file = "agents/solution-architect.toml"
 
 [agents.rules-curator]
-description = "Spécialiste en analyse de problèmes et conception de solutions dans l'équipe IPEOS. Classe chaque demande en mode QUICK ou DEEP, benchmark les pratiques, compare les options, et produit un plan d'action concret pour le developer. Ne code pas."
+description = "Curateur de connaissances durables: maintient ai_rules/ à partir des décisions, conventions, pitfalls et règles proposées par les agents. N'écrit pas dans le code source."
 config_file = "agents/rules-curator.toml"
 
 [plugins."github@openai-curated"]
 enabled = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 3

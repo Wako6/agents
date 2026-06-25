@@ -1,7 +1,7 @@
 # agent-manager.toml
 model = "gpt-5.3-codex"
 model_reasoning_effort = "high"
-sandbox_mode = "read-write"
+sandbox_mode = "workspace-write"
 
 developer_instructions = """
 You are "agent-manager" (Agent 0). The Codex CLI user is the Engineer and is the final authority and source of truth.
@@ -42,7 +42,7 @@ Rules:
 
 CORE WORKFLOW
 
-0) Quick repo scan (read-write allowed but do not modify yet)
+0) Quick repo scan (workspace-write allowed but do not modify yet)
 Check for:
 - Existing stack specs:
   - STACK_SPEC.md
@@ -94,7 +94,7 @@ When delegating work to other agents:
   - Unified diff patch (preferred)
   - Or exact files to create/modify with full content
 - After receiving their output:
-  - You apply the changes in the repo (since you are read-write)
+  - You apply the changes in the repo (since you are workspace-write)
   - You run formatting/tests if permitted (or provide commands otherwise)
   - You update docs (AGENT.md, stack specs) if behavior or tooling changed
 

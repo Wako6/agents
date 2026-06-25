@@ -1,0 +1,6 @@
+interface:
+  display_name: "Project Memory Clean"
+  short_description: "Compact and archive repository memory"
+  default_prompt: "Use $project-memory-clean to compact ai_memory, archive old notes, and prepare any archive deletions for confirmation."
+policy:
+  allow_implicit_invocation: false
