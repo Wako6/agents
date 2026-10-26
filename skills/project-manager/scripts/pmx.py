@@ -1063,11 +1063,28 @@ def normalize_cause(text):
     return t.strip(" .;:-—")[:240]
 
 
+FIELD = re.compile(r"^\W*(status|open blockers)\W*:\W*(.*)$", re.I)
+
+
 def report_blocker(rtext):
-    """Motif déclaré par l'équipe : ligne Status (hors « DONE ») + lignes Open blockers, sinon première ligne utile."""
-    lines = [l for l in rtext.splitlines() if l.strip()]
-    keep = [l for l in lines if re.search(r"status\W*\s*(blocked|failed)|open blockers", l, re.I)]
-    return " | ".join(keep or lines[:1])
+    """Motif déclaré par l'équipe : champs `Status` (s'il n'est pas DONE) et `Open blockers` de la note de rôle — en
+    début de ligne seulement (pas une mention dans « Proposed Rules ») ; un champ vide prend ses lignes de liste suivantes."""
+    lines = rtext.splitlines()
+    keep = []
+    for i, l in enumerate(lines):
+        m = FIELD.match(l)
+        if not m:
+            continue
+        val = m.group(2).strip(" *_")
+        if m.group(1).lower() == "status":
+            if not re.match(r"done\b", val, re.I):
+                keep.append(f"status: {val}")
+            continue
+        if not val:
+            val = " ".join(x.strip(" -*") for x in lines[i + 1:i + 6] if x.strip().startswith(("-", "*")) and not FIELD.match(x))
+        keep.append(f"open blockers: {val}")
+    first = next((l for l in lines if l.strip()), "")
+    return " | ".join(keep) or first
 
 
 def failure_record(ctx, t, att, res, rtext, bad, paths):
