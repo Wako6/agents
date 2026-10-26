@@ -777,6 +777,10 @@ def scope_check(ctx, task, wt, base):
 
 def team_brief(ctx, st, key, attempt, wt, report):
     t = st["tasks"][key]
+    if ctx.o["teams"][t["team"]].get("adapter") == "drop":
+        where = f"Écris ton rapport dans `{report}` (hors worktree ; seul fichier extérieur autorisé)"
+    else:  # Codex/claude -p : la sortie est capturée par l'orchestrateur ; écrire hors du worktree est impossible (sandbox)
+        where = "Ton DERNIER MESSAGE est ton rapport (l'orchestrateur le capture) ; n'écris aucun fichier de rapport, ni dans ni hors du worktree"
     role = load_role(ctx, "developer")
     plan = json.loads((ctx.run_dir(st["run"]) / "plan.json").read_text(encoding="utf-8"))
     spec = next(x for x in plan["tasks"] if x["key"] == key)
@@ -809,8 +813,8 @@ l'orchestrateur arrête les DEUX équipes. Besoin d'un autre fichier → n'y tou
 - aucun accès réseau, aucune installation de dépendance, aucune lecture de secret ; ne sors pas de `{wt}`.
 
 ## Rapport final (obligatoire)
-Écris ton rapport dans `{report}` (hors worktree) au format note de rôle :
-Work item | Role | Status (DONE/BLOCKED) | Scope | Files touched | Evidence (commande + sortie) | Decisions | Open blockers | Next actions | Recall hints | Proposed Rules (optionnel).
+{where}, au format note de rôle, avec une ligne `Status: DONE` ou `Status: BLOCKED` :
+Work item | Role | Status | Scope | Files touched | Evidence (commande + sortie) | Decisions | Open blockers | Next actions | Recall hints | Proposed Rules (optionnel).
 
 ---
 ## Définition du rôle `developer` (agents/developer.md du kit V3, réutilisée telle quelle)
@@ -922,7 +926,7 @@ def cmd_report(ctx, a):
         write_atomic(pathlib.Path(att["report"]), src.read_text(encoding="utf-8"))
     tdir = ctx.run_dir(a.run) / "tasks" / a.task
     write_atomic(tdir / f"result-a{att['n']}.json", json.dumps({"exit": 0 if a.status == "done" else 1, "started": att["started"], "ended": now(), "via": "report"}) + "\n")
-    ctx.event(a.run, "team_reported", task=a.task, status=a.status)
+    ctx.event(a.run, "team_reported", task=a.task, status=a.status, attempt=att["n"])
     return cmd_tick(ctx, a)
 
 
@@ -1026,7 +1030,7 @@ def _finish_attempt(ctx, st, key, res):
         return
     att["result"] = "interrupted" if res.get("interrupted") else "failed"
     att.setdefault("failure", "processus interrompu sans résultat" if res.get("interrupted") else f"exit {res.get('exit')}")
-    tries = len(t["attempts"])
+    tries = len(t["attempts"]) - t.get("budget_base", 0)
     ctx.event(run, "team_finished", task=key, wi=t["wi"], result=att["result"], reason=att["failure"], attempt=tries)
     if tries >= ctx.o["max_attempts"]:
         wi_set(ctx, t["wi"], status="ESCALATED", attempt_count=tries, blocker=f"{tries} attempts failed: {att['failure']}")
@@ -1101,7 +1105,7 @@ def cmd_verify(ctx, a):
             if verdict == "PASS":
                 wi_set(ctx, t["wi"], status="READY_FOR_REVIEW", links=str(note))
             else:
-                tries = len(t["attempts"])
+                tries = len(t["attempts"]) - t.get("budget_base", 0)
                 wi_set(ctx, t["wi"], status="ESCALATED" if tries >= ctx.o["max_attempts"] else "OPEN", attempt_count=tries, blocker=f"verifier FAIL on {t['commit'][:10]}")
                 worst = EXIT_FAIL
             ctx.save_run(st)
@@ -1294,7 +1298,7 @@ def cmd_status(ctx, a):
         else:
             last = next((e["ts"] for e in reversed(evs) if e.get("task") == k), None)
             act = f"externe — dernier événement {last}" if not att.get("ended") else f"terminé {att['ended']}"
-        print(f"| {k} | {t['team']} ({att['adapter']}) | {att['branch']} | {listed} | {act} | {len(t['attempts'])}/{ctx.o['max_attempts']} |")
+        print(f"| {k} | {t['team']} ({att['adapter']}) | {att['branch']} | {listed} | {act} | {len(t['attempts'])} (budget {len(t['attempts']) - t.get('budget_base', 0)}/{ctx.o['max_attempts']}) |")
     if st.get("integration"):
         i = st["integration"]
         print(f"\nIntégration locale : {i['target']} → {i['commit'][:10]} (accord {i['approved_by']}, {i['ts']})")
@@ -1303,40 +1307,34 @@ def cmd_status(ctx, a):
 
 
 def intervals(evs):
+    """Intervalles d'exécution par tentative : début = lancement ; fin = fin du processus / rapport (sinon passage de surveillance)."""
     iv = {}
     for e in evs:
+        k = (e.get("task"), e.get("attempt", 1))
         if e["event"] == "team_started":
-            iv.setdefault(e["task"], []).append([parse_ts(e["ts"]), None, e.get("pid"), e.get("adapter")])
-        elif e["event"] == "team_finished" and e["task"] in iv:
-            iv[e["task"]][-1][1] = parse_ts(e["ts"])
+            iv[k] = [parse_ts(e["ts"]), None, e.get("pid"), e.get("adapter")]
+        elif e["event"] in ("team_process_end", "team_reported") and k in iv:
+            iv[k][1] = parse_ts(e["ts"])
+        elif e["event"] == "team_finished" and k in iv and iv[k][1] is None:
+            iv[k][1] = parse_ts(e["ts"])
     return iv
 
 
 def cmd_evidence(ctx, a):
     evs = ctx.events(a.run)
-    iv = intervals(evs)
-    st = ctx.load_run(a.run)
-    # fin réelle d'exécution (fin du processus ou rapport), plus précise que le passage de surveillance
-    ends = {}
-    for e in evs:
-        if e["event"] in ("team_process_end", "team_reported"):
-            ends[e["task"]] = parse_ts(e["ts"])
-    rows = []
-    for k, lst in iv.items():
-        s, f, pid, ad = lst[-1]
-        f = ends.get(k, f)
-        rows.append((k, s, f, pid, ad))
+    rows = [(f"{k}#a{n}", s, f, pid, ad) for (k, n), (s, f, pid, ad) in intervals(evs).items()]
     print("| Tâche | Adaptateur | PID | Début | Fin | Durée (s) |\n|---|---|---|---|---|---|")
     for k, s, f, pid, ad in rows:
         print(f"| {k} | {ad} | {pid or 'externe'} | {s.isoformat()} | {f.isoformat() if f else '—'} | {round((f - s).total_seconds(), 1) if f else '—'} |")
     overlaps = []
     for i, (k1, s1, f1, *_r) in enumerate(rows):
         for k2, s2, f2, *_q in rows[i + 1:]:
-            if f1 and f2:
+            if f1 and f2 and k1.split("#")[0] != k2.split("#")[0]:
                 ov = (min(f1, f2) - max(s1, s2)).total_seconds()
                 overlaps.append((k1, k2, ov))
+    print()
     for k1, k2, ov in overlaps:
-        print(f"\nChevauchement {k1} ‖ {k2} : {round(ov, 1)} s → {'PARALLÈLE' if ov > 0 else 'séquentiel'}")
+        print(f"Chevauchement {k1} ‖ {k2} : {round(ov, 1)} s → {'PARALLÈLE' if ov > 0 else 'séquentiel'}")
     out = {"tasks": [{"task": k, "adapter": ad, "pid": pid, "start": s.isoformat(), "end": f.isoformat() if f else None} for k, s, f, pid, ad in rows],
            "overlaps": [{"a": k1, "b": k2, "seconds": ov} for k1, k2, ov in overlaps]}
     write_atomic(ctx.run_dir(a.run) / "parallelism.json", json.dumps(out, indent=2) + "\n")
@@ -1366,6 +1364,27 @@ def cmd_resume(ctx, a):
     return cmd_status(ctx, a)
 
 
+def cmd_reopen(ctx, a):
+    """Décision humaine sur un WI BLOCKED/ESCALATED : rouvre avec un nouveau budget de tentatives (historique conservé)."""
+    if not a.by.startswith("human:"):
+        die("--by human:<nom> requis : seule une décision humaine lève une escalade", EXIT_USAGE)
+    with ctx.lock():
+        st = ctx.load_run(a.run)
+        t = st["tasks"].get(a.task) or die(f"tâche inconnue {a.task}")
+        cur = wi_status(ctx, t["wi"])
+        if cur not in ("BLOCKED", "ESCALATED"):
+            die(f"{t['wi']} est {cur} : seule une tâche BLOCKED/ESCALATED se rouvre")
+        t["budget_base"] = len(t["attempts"])
+        wi_set(ctx, t["wi"], status="OPEN", blocker=f"reopened by {a.by}: {a.reason}")
+        ctx.save_run(st)
+        p = ctx.root / "ai_doc" / f"DECISIONS__{st['parent_wi']}.md"
+        prev = p.read_text(encoding="utf-8") if p.exists() else f"# Decision log — {st['parent_wi']}\n"
+        write_atomic(p, prev.rstrip() + f"\n\n## {now()} — reopen {t['wi']} ({a.task}) after {cur}\n- Decided by: {a.by}\n- Reason: {a.reason}\n- Previous attempts kept: {len(t['attempts'])}; new attempt budget: {ctx.o['max_attempts']}\n")
+    ctx.event(a.run, "task_reopened", task=a.task, by=a.by, reason=a.reason)
+    print(f"{t['wi']} rouvert ({a.by}) — `dispatch` pour relancer")
+    return EXIT_OK
+
+
 def cmd_abort(ctx, a):
     return abort_all(ctx, a.run, a.reason or "arrêt demandé")
 
@@ -1393,6 +1412,8 @@ def main(argv=None):
     p.add_argument("--task"); p.add_argument("--file")
     p = sp.add_parser("integrate"); p.add_argument("--run", required=True); p.add_argument("--approved-by"); p.add_argument("--dry-run", action="store_true")
     p = sp.add_parser("abort"); p.add_argument("--run", required=True); p.add_argument("--reason")
+    p = sp.add_parser("reopen"); p.add_argument("--run", required=True); p.add_argument("--task", required=True)
+    p.add_argument("--by", required=True); p.add_argument("--reason", required=True)
     p = sp.add_parser("_team"); p.add_argument("--run", required=True); p.add_argument("--task", required=True); p.add_argument("--attempt", required=True)
     a = ap.parse_args(argv)
     ctx = Ctx(a.root)
@@ -1404,7 +1425,7 @@ def main(argv=None):
         die("review submit --task … --file …", EXIT_USAGE)
     fn = {"doctor": cmd_doctor, "start": cmd_start, "debate": cmd_debate, "decide": cmd_decide, "plan": cmd_plan, "dispatch": cmd_dispatch,
           "tick": cmd_tick, "wait": cmd_wait, "report": cmd_report, "verify": cmd_verify, "review": cmd_review, "integrate": cmd_integrate,
-          "status": cmd_status, "evidence": cmd_evidence, "resume": cmd_resume, "abort": cmd_abort, "_team": cmd_team}[a.cmd]
+          "status": cmd_status, "evidence": cmd_evidence, "resume": cmd_resume, "abort": cmd_abort, "reopen": cmd_reopen, "_team": cmd_team}[a.cmd]
     return fn(ctx, a)
 
 

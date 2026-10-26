@@ -199,6 +199,24 @@ class Pilot(unittest.TestCase):
         wi = next(iter(wis))
         self.assertEqual(self.status_of(wi), "ESCALATED")
         self.assertIn("- attempt_count: 2", self.ledger())
+        self.pmx("reopen", "--run", run, "--task", "a", "--by", "consensus", "--reason", "x", code=64)  # humain seulement
+        self.pmx("reopen", "--run", run, "--task", "a", "--by", "human:tester", "--reason", "brief fixed", code=0)
+        self.assertEqual(self.status_of(wi), "OPEN")
+        self.pmx("dispatch", "--run", run, code=0)
+        self.pmx("wait", "--run", run, "--interval", "0.3", code=0)
+        self.assertEqual(self.status_of(wi), "ESCALATED")  # nouveau budget de 2, épuisé à nouveau
+        st = json.loads((self.root / "ai_memory" / "runs" / run / "run.json").read_text())
+        self.assertEqual(len(st["tasks"]["a"]["attempts"]), 4)
+
+    def test_14_process_team_brief_has_no_out_of_sandbox_report_path(self):
+        self.config({"team-a": team("ok"), "team-b": {"adapter": "drop"}})
+        run, wis = self.to_approved([self.task("a", "team-a", ["src/a.js"]), self.task("b", "team-b", ["src/b.js"])])
+        self.pmx("dispatch", "--run", run, code=10)
+        ba = (self.root / "ai_memory" / "runs" / run / "tasks" / "a" / "brief-a1.md").read_text()
+        bb = (self.root / "ai_memory" / "runs" / run / "tasks" / "b" / "brief-a1.md").read_text()
+        self.assertIn("DERNIER MESSAGE est ton rapport", ba)
+        self.assertNotIn("report-a1.md", ba)
+        self.assertIn("report-a1.md", bb)
 
     def test_09_resume_after_interruption(self):
         self.config({"team-a": team("crash"), "team-b": team("ok")}, auto_retry=False)
