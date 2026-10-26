@@ -1263,7 +1263,7 @@ def cmd_integrate(ctx, a):
         st.setdefault("integrations", []).append({"target": target, "commit": new, "merged": merged, "approved_by": a.approved_by, "ts": now()})
         st["integration"] = {"target": target, "previous": old, "commit": new, "tree": tree, "approved_by": a.approved_by, "ts": now(), "results": res, "merged": merged}
         for k in merged:
-            wi_set(ctx, st["tasks"][k]["wi"], status="DONE", integrated=f"{target}@{new[:10]}")
+            wi_set(ctx, st["tasks"][k]["wi"], status="DONE", integrated=f"{target}@{new[:10]}", blocker="—")
         if all(wi_status(ctx, t["wi"]) == "DONE" for t in st["tasks"].values()):
             wi_set(ctx, st["parent_wi"], status="READY_FOR_REVIEW", integrated=f"{target}@{new[:10]} (local; merge to {st['base_branch']} is human-only)")
         ctx.save_run(st)
