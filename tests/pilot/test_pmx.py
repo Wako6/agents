@@ -236,8 +236,19 @@ class Pilot(unittest.TestCase):
         self.assertEqual(st["tasks"]["c"]["attempts"], [])  # a pas encore intégrée → c ne part pas
         self.pmx("verify", "--run", run, code=0)
         self.pmx("review", "run", "--run", run, code=0)
-        # intégration partielle refusée tant que c n'est pas prête : la politique exige toutes les tâches
-        self.pmx("integrate", "--run", run, "--approved-by", "tester", code=1)
+        # intégration par vague : a seule, puis c part depuis la branche d'intégration
+        self.pmx("integrate", "--run", run, "--approved-by", "tester", code=0)
+        wi_c = next(w for w, k in wis.items() if k == "c")
+        self.assertEqual(self.status_of(run), "IN_PROGRESS")  # parent pas fini tant que c n'est pas intégrée
+        self.pmx("wait", "--run", run, "--interval", "0.3", code=0)
+        st = json.loads((self.root / "ai_memory" / "runs" / run / "run.json").read_text())
+        self.assertEqual(st["tasks"]["c"]["attempts"][0]["base"], st["integrations"][0]["commit"])
+        self.pmx("verify", "--run", run, code=0)
+        self.pmx("review", "run", "--run", run, code=0)
+        self.pmx("integrate", "--run", run, "--approved-by", "tester", code=0)
+        self.assertEqual(self.status_of(wi_c), "DONE")
+        self.assertEqual(self.status_of(run), "READY_FOR_REVIEW")
+        self.assertIn("src/a.js", self.git("ls-tree", "-r", "--name-only", "pilot/integration"))
 
     def test_12_lead_guard_refuses_linked_worktree(self):
         self.config({"team-a": team("ok"), "team-b": team("ok")})

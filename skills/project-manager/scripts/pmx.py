@@ -780,6 +780,7 @@ def team_brief(ctx, st, key, attempt, wt, report):
     role = load_role(ctx, "developer")
     plan = json.loads((ctx.run_dir(st["run"]) / "plan.json").read_text(encoding="utf-8"))
     spec = next(x for x in plan["tasks"] if x["key"] == key)
+    shared = "\n".join(f"### {k}\n{v}" for k, v in plan.items() if k != "tasks") or "—"
     return f"""# Brief d'équipe — {t['wi']} ({key}) · tentative {attempt}
 
 Tu es l'équipe **{t['team']}** du pilote multi-agents, rôle **developer** du Project Manager V3 (définition ci-dessous).
@@ -791,6 +792,9 @@ Tu travailles SEUL dans ce worktree isolé : `{wt}` (branche `{ctx.o['branch_pre
 - Décision issue du débat (à respecter) : {st['decision']['text']}
 - Détails : {spec.get('details', '—')}
 - Critères d'acceptation : {json.dumps(t['acceptance'], ensure_ascii=False)}
+
+## Contexte commun du plan (contrat figé par le débat — identique pour les deux équipes)
+{shared}
 
 ## Périmètre — fichiers autorisés (et SEULEMENT eux)
 {chr(10).join(f'- `{f}`' for f in t['files'])}
@@ -1194,10 +1198,12 @@ def cmd_integrate(ctx, a):
     c(upstream.returncode != 0, "cible sans branche amont (aucun push possible par pmx, qui n'en contient aucun)")
     if not a.dry_run:
         c(bool(a.approved_by), "accord humain explicite (--approved-by)")
-    keys = [k for w in st["plan"]["waves"] for k in w]
+    # intégration par vague : les tâches prêtes (READY_FOR_REVIEW) dont les dépendances sont déjà intégrées (DONE)
+    keys = [k for w in st["plan"]["waves"] for k in w if wi_status(ctx, st["tasks"][k]["wi"]) == "READY_FOR_REVIEW"]
+    c(bool(keys), "au moins une tâche READY_FOR_REVIEW")
     for k in keys:
         t = st["tasks"][k]
-        c(wi_status(ctx, t["wi"]) == "READY_FOR_REVIEW", f"{k} : READY_FOR_REVIEW")
+        c(all(wi_status(ctx, st["tasks"][d]["wi"]) == "DONE" for d in t["depends_on"]), f"{k} : dépendances intégrées")
         c((t.get("verify") or {}).get("verdict") == "PASS" and t["verify"]["commit"] == t["commit"], f"{k} : verifier PASS sur le commit livré")
         if "APPROVE" in pol.get("require_review_verdict", ["APPROVE"]):
             c((t.get("review") or {}).get("verdict") == "APPROVE" and t["review"]["commit"] == t["commit"], f"{k} : revue croisée APPROVE")
@@ -1242,10 +1248,12 @@ def cmd_integrate(ctx, a):
         subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", "--force", str(iwt)], capture_output=True)
     with ctx.lock():
         st = ctx.load_run(a.run)
+        st.setdefault("integrations", []).append({"target": target, "commit": new, "merged": merged, "approved_by": a.approved_by, "ts": now()})
         st["integration"] = {"target": target, "previous": old, "commit": new, "tree": tree, "approved_by": a.approved_by, "ts": now(), "results": res, "merged": merged}
         for k in merged:
             wi_set(ctx, st["tasks"][k]["wi"], status="DONE", integrated=f"{target}@{new[:10]}")
-        wi_set(ctx, st["parent_wi"], status="READY_FOR_REVIEW", integrated=f"{target}@{new[:10]} (local; merge to {st['base_branch']} is human-only)")
+        if all(wi_status(ctx, t["wi"]) == "DONE" for t in st["tasks"].values()):
+            wi_set(ctx, st["parent_wi"], status="READY_FOR_REVIEW", integrated=f"{target}@{new[:10]} (local; merge to {st['base_branch']} is human-only)")
         ctx.save_run(st)
         p = ctx.root / "ai_doc" / f"DECISIONS__{st['parent_wi']}.md"
         prev = p.read_text(encoding="utf-8") if p.exists() else f"# Decision log — {st['parent_wi']}\n"
