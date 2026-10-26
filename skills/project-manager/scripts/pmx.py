@@ -1117,7 +1117,7 @@ def cmd_verify(ctx, a):
 # ---------------------------------------------------------------- revue croisée (I2, lecture seule)
 
 REVIEW_PROMPT = """Tu es reviewer pour le pilote multi-agents (revue croisée entre équipes). LECTURE SEULE : tu ne modifies aucun fichier, tu ne corriges rien.
-Dépôt : {root}. Work item revu : {wi} — {title}. Produit par l'équipe {team} ; tu appartiens à l'autre équipe.
+Dépôt : {root}. Checkout détaché du commit revu (pour lire le code et lancer `{test}`) : {checkout}. Work item revu : {wi} — {title}. Produit par l'équipe {team} ; tu appartiens à l'autre équipe.
 Décision d'architecture à respecter : {decision}
 Critères d'acceptation : {acceptance}
 Périmètre autorisé : {files}
@@ -1148,10 +1148,13 @@ def cmd_review(ctx, a):
         acfg = ctx.o["teams"][reviewer].get("reviewer") or ctx.o["teams"][reviewer]
         diff = git(ctx.root, "diff", f"{t['attempts'][-1]['base']}..{t['commit']}")
         pf, of = rdir / f"{key}.prompt.md", rdir / f"{key}.answer.md"
-        write_atomic(pf, REVIEW_PROMPT.format(root=ctx.root, wi=t["wi"], title=t["title"], team=t["team"], decision=st["decision"]["text"],
+        cdir = ctx.wt_root / f"_review-{key}-{t['commit'][:8]}"
+        if not cdir.exists():
+            git(ctx.root, "worktree", "add", "-q", "--detach", str(cdir), t["commit"])
+        write_atomic(pf, REVIEW_PROMPT.format(root=ctx.root, checkout=cdir, test=t["test_command"], wi=t["wi"], title=t["title"], team=t["team"], decision=st["decision"]["text"],
                                               acceptance=json.dumps(t["acceptance"], ensure_ascii=False), files=t["files"], commit=t["commit"][:10], diff=diff))
         ctx.event(a.run, "review_requested", task=key, reviewer=reviewer, adapter=acfg.get("adapter"))
-        rc = run_agent_sync(ctx, acfg, pf, of, ctx.root, "read", rdir / "agents.log", ctx.o["team_timeout_s"])
+        rc = run_agent_sync(ctx, acfg, pf, of, cdir, "read", rdir / "agents.log", ctx.o["team_timeout_s"])
         if rc is None:
             waiting.append((key, reviewer, pf))
             continue
@@ -1176,6 +1179,11 @@ def _record_review(ctx, run, key, text, source):
         write_atomic(ctx.root / rel, f"# Peer review — {t['wi']} — {t['title']}\n\nReviewer: {source} · Commit: {t['commit']} · Date: {now()} · Verdict: **{verdict}**\n\n{text.strip()}\n")
         t["review"] = {"verdict": verdict, "by": source, "commit": t["commit"], "file": str(rel), "ts": now()}
         ctx.save_run(st)
+    cdir = ctx.wt_root / f"_review-{key}-{t['commit'][:8]}"
+    if cdir.exists():  # checkout propre créé par pmx ; non forcé : s'il a été modifié, il reste et c'est signalé
+        rm = subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", str(cdir)], capture_output=True, text=True)
+        if rm.returncode != 0:
+            print(f"  ⚠ checkout de revue modifié, conservé : {cdir}")
     ctx.event(run, "reviewed", task=key, verdict=verdict, by=source)
     print(f"  {'✔' if verdict == 'APPROVE' else '⚠'} {key} : revue {verdict} ({source}) → {rel}  — triage manager (review-triage.md)")
     return EXIT_OK if verdict == "APPROVE" else EXIT_HUMAN
