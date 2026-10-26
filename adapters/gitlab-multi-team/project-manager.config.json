@@ -1,0 +1,16 @@
+{
+  "schema": "pm-v3/1",
+  "_comment": "Exemple : projet GitLab multi-équipes. <projet>, <intégration> et les labels d'état sont LUS dans le tableau « Référentiel » de CLAUDE.md (voir referentiel.example.md) : aucune valeur copiée ici. Adapter 'proof' et 'production_branch' au projet, ou les retirer.",
+  "work_items": {
+    "backend": "gitlab-issues",
+    "gitlab": {
+      "referential": { "file": "CLAUDE.md", "rows": { "project": "`<projet>`", "integration": "`<intégration>`", "state_labels": "labels d'état" } },
+      "production_branch": "main"
+    }
+  },
+  "profile": ".claude/project-manager.profile.md",
+  "reading_map": ["CLAUDE.md"],
+  "proof": { "command": "cd \"$(git rev-parse --show-toplevel)\" && . .venv/bin/activate && .claude/hooks/record-verification.sh", "file": "ai_memory/verification.json" },
+  "multi_team": { "enabled": true, "lead_in_main_checkout": true },
+  "language": { "user": "fr", "memory": "en" }
+}

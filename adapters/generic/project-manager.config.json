@@ -1,0 +1,8 @@
+{
+  "schema": "pm-v3/1",
+  "_comment": "Exemple pour un projet neuf : registre local (ledger). Copier dans <repo>/.claude/project-manager.config.json et adapter.",
+  "work_items": { "backend": "ledger" },
+  "reading_map": ["CLAUDE.md"],
+  "multi_team": { "enabled": false },
+  "language": { "user": "fr", "memory": "en" }
+}

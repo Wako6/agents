@@ -1,0 +1,9 @@
+{
+  "_comment": "SNIPPET pour .mcp.json (projet) ou ~/.claude.json — requis uniquement par frontend-reviewer-analyst. Sous WSL : lancer Chrome avec --remote-debugging-port=9222.",
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest", "--channel", "stable", "--headless", "--isolated", "--no-usage-statistics"]
+    }
+  }
+}

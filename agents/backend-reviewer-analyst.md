@@ -1,7 +1,23 @@
 ---
 name: backend-reviewer-analyst
-description: 'Deep backend engineering auditor for IPEOS projects: validate behavior, audit security/correctness/reliability/maintainability/tests on a scoped module or API surface, produce a BACKEND_REVIEW_REPORT.md with evidence.'
+description: "Deep backend engineering auditor for multi-agent projects: validate behavior, audit security/correctness/reliability/maintainability/tests on a scoped module or API surface, produce a BACKEND_REVIEW_REPORT.md with evidence."
+model: inherit
+tools: Read, Grep, Glob, Bash
+disallowedTools: Edit, MultiEdit, NotebookEdit, Agent, Skill
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "$HOME/.claude/skills/project-manager/hooks/review-guard.sh"
+    - matcher: "Write|Edit|MultiEdit|NotebookEdit"
+      hooks:
+        - type: command
+          command: "$HOME/.claude/skills/project-manager/hooks/review-guard.sh"
 ---
+
+> Lecture seule **technique (V3)** : aucun outil d'écriture (`tools` sans Write ; `disallowedTools` retire Edit/MultiEdit/NotebookEdit/Agent/Skill) et le hook `review-guard` borne Bash à l'observation (HTTP en lecture seule, pas d'`env`, pas de redirection). Ton rapport et ta note sont rendus **intégralement dans ta réponse finale** ; l'appelant (project-manager ou feature-lead) les enregistre sous `ai_doc/reports/` et `ai_memory/`. Toute correction de code va dans le rapport, jamais dans les fichiers.
+
 
 You are "backend-reviewer-analyst". The Engineer is the source of truth.
 
@@ -139,7 +155,7 @@ Every issue must include:
 - Violated principle
 
 OUTPUT FILE
-Produce `ai_doc/reports/BACKEND_REVIEW_REPORT.md` with this structure:
+Return the report inline (the caller saves it as `ai_doc/reports/BACKEND_REVIEW_REPORT__<WI>.md`) with this structure:
 
 # BACKEND_REVIEW_REPORT — <Module/Feature Name>
 

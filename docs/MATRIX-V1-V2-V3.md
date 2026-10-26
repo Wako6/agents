@@ -1,0 +1,35 @@
+# Matrice V1 / V2 / V3
+
+V1 = PM installé dans le projet pilote · V2 = `claude-agents-v2` · V3 = Project Manager V3 Unified.
+Statut V3 : **Conservé** · **Repris** (d'une version) · **Fusionné** · **Durci** · **Nouveau** · **Interface** (non implémenté).
+Test = identifiant de contrôle dans `tests/run.sh` (§ section) ou « session réelle » (non validable hors Claude Code).
+
+| # | Domaine | Source | Comportement existant | Comportement V3 | Justification | Risque de régression | Test de validation |
+|---|---|---|---|---|---|---|---|
+| 1 | Skill public | V1+V2 | V1 : 1 skill ; V2 : 3 skills publics | **1 skill public** `project-manager` ; analyse et nettoyage = protocoles internes (`references/problem-solver.md`, `memory-clean.md`) | règle de fusion 3 et 4 ; appel skill→skill non documenté | les commandes `/project-problem-solver` et `/project-memory-clean` disparaissent (déclencheurs repris par le PM) | §1 « un seul skill public », « protocoles ex-skills présents et routés » ; §5 « ex-skills absents » ; session réelle |
+| 2 | Routage d'intention | V2 | V1 : déclencheurs explicites ; V2 : table d'intentions | table V2 + intentions V1 (« cadrer », « où en sont les équipes ») + intention multi-équipes | améliorations V2 compatibles | auto-activation plus large qu'en V1 → garde-fou session-feature ajouté | §1 « routage » ; session réelle |
+| 3 | Garde-fou en cascade | V1+V2 | V1 textuel ; V2 + `disallowedTools` | textuel + `disallowedTools: Skill` partout, `Agent` partout sauf feature-lead ; **garde-fou session-feature/worktree** | V2 plus fort ; feature-lead doit pouvoir déléguer | aucun pour V1 | §1 « cascade guard » ×2 |
+| 4 | Registre de work items | V1 / V2 | V1 : issues GitLab `#NN` ; V2 : ledger `WI-…` | **un backend par projet** (`gitlab-issues` ou `ledger`) choisi par `.claude/project-manager.config.json` ; détection + refus d'un second registre | règles 1, 6 et « pas de second système » | projet sans configuration → demande à l'utilisateur (au lieu d'agir) | §4 détection (ledger 0, neuf 2, GitLab 2, conflit 3), invalides ; §8 projet pilote |
+| 5 | Statuts | V1+V2 | V1 : 5 labels ; V2 : 8 statuts | table de correspondance unique (8 statuts ↔ labels) | cohérence | aucun | §1 « table de correspondance » |
+| 6 | Dépendances | V1+V2 | V1 : déblocage sur S7 INTÉGRÉE seulement ; V2 : `depends_on` | GitLab : S7 conservé à l'identique (+ variante API sans fetch) ; ledger : `depends_on` | règle 1 | aucun | §1 « garde-fous du PM du projet pilote conservés » |
+| 7 | Contrôle S7 | V1 | table INTÉGRÉE / NON INTÉGRÉE / INCERTAINE | conservé + lecture d'ascendance par l'API | règle 1 ; pratique validée le 2026-10-26 | aucun | §1 ; utilisé en réel sur le projet pilote (hors kit) |
+| 8 | Mode multi-équipes | V1 | sessions-feature, specs, brief, feature-lead, état fonctionnel/technique | conservé (`multi-team.md`, `session-brief.md`, `spec-template.md`, agent `feature-lead`) ; exige le backend GitLab | règle 1 | aucun en GitLab ; ledger : interface seulement | §1 rôles ; session réelle |
+| 9 | Accords | V1+V2 | V1 : un accord **par opération** ; V2 : accord global | **un accord par opération sortante** partout, aucun merge par l'IA | règle 10 (le plus strict) | aucun | §1 ; §3 « règle globale : un accord par opération » |
+| 10 | Preuve de test | V1 | `record-verification.sh`, PASS sur arbre et HEAD | générique `proof.command` (config) ; projet pilote via adaptateur | universalité sans perte | aucun pour le projet pilote (profil) | §8 adaptateur résolu |
+| 11 | Mode GitLab injoignable | V1 | `PENDING_GITLAB.md`, jamais d'état simulé | conservé (backend GitLab) | règle 1 | aucun | §1 |
+| 12 | explorer | V1+V2 | V1 GitLab/session lead ; V2 crée `CLAUDE.md`/`@AGENT.md` | fusionné : backend-neutre ; ne réécrit jamais une ligne lue par une machine ; `CLAUDE.md` créé seulement s'il manque | protéger le Référentiel lu par verify-gate | aucun | revue + §1 |
+| 13 | developer / solution-architect | V1+V2 | quasi identiques | base V1 (FR), backend-neutre, `disallowedTools` | règle 1 | aucun | §1 |
+| 14 | verifier | V1 / V2 | V1 sans Write ; V2 avec Write | **sans Write**, note inline, commande de preuve si configurée | règle 10 | aucun | §1 « verifier et reviewers sans Write » |
+| 15 | Reviewers | V1 / V2 | V1 inline ; V2 Write + review-guard | **sans Write** (inline) + review-guard **durci** | règle 10 | rapports enregistrés par l'appelant (déjà le cas en V1) | §1 ; §2 (27 cas) |
+| 16 | django-reviewer | V1 / V2 | deux agents | **un seul** `django-reviewer` (nom V1) avec le runtime V2 en lecture seule (GET), sans demande de jetons | règles 1, 5, 10 | runtime d'écriture non testable par le reviewer (passe par les tests du projet) | §1 « aucun agent dupliqué » |
+| 17 | rules-curator | V1+V2 | V1 deux temps ; V2 Autoload/Paths/contradictions | fusionné : **deux temps** + Autoload/Paths + contradictions | règles 1, 2, 10 | aucun | §1 « triage en deux temps » |
+| 18 | Règles natives | V2 | globale + projet + générées | reprises ; globale **neutre vis-à-vis du backend** et plus stricte (accord par opération) | éviter les contradictions (règles user/projet sans priorité) | aucune entrée `Autoload` dans le projet pilote → aucun effet | §3 |
+| 19 | `rules_sync.py` | V2 | validation + génération | repris tel quel | — | aucun | §3 (4 tests) ; §8 projet pilote |
+| 20 | memory-clean / memory-cleaner | V2 | ledger seulement | protocole + agent **conscients du backend** (liste des items clos fournie par le PM) | GitLab sans ledger | aucun | revue ; session réelle |
+| 21 | Agents V2 seuls | V2 | code-base-analyst, devops, backend/frontend reviewers, optionnels | repris (reviewers sans Write) | règle 2 | aucun (agents projet du projet pilote prioritaires) | §1 |
+| 22 | Configuration de projet | — | V1 : valeurs dans `CLAUDE.md` ; V2 : aucune | `.claude/project-manager.config.json` + profil ; valeurs **référencées** (pas copiées) | universalité ; pas de troisième copie du Référentiel | une ligne de référentiel illisible → erreur (jamais de défaut silencieux) | §4 ; §8 |
+| 23 | Installateur | V2 | non destructif | + refus de masquage, skill traité comme une unité (pas d'hybride), refus des chemins protégés, dépendances, droits, état git, verrou d'interruption, copie atomique | défauts V2 trouvés | aucun | §5, §6 (11 tests négatifs) |
+| 24 | Rollback | V2 | restaure / supprime | + reprise d'installation interrompue, suppression de dossiers vides limitée au chemin des fichiers retirés | défaut V2 | aucun | §5, §6, §8 |
+| 25 | Extensions | V2 | contrats Claudex/Codex/équipes | + revues croisées, GitLab conditionnel, ressources/coûts, reprise multi-agents (interfaces) | phase D | aucun (non implémenté) | §1 « aucune dépendance obligatoire » |
+| 26 | Snippet de permissions | V2 | contient des règles Django/docker | générique ; règles de stack déplacées vers le projet | universalité | aucun | revue |
+| 27 | Garde-fous du projet pilote | V1 | verify-gate, protect-files, policy.json, settings | **jamais touchés** ; référencés par le profil | contrainte de mission | aucun | §8 « garde-fous inchangés » |

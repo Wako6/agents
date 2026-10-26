@@ -1,0 +1,20 @@
+# <Nom du projet>
+
+<Une phrase : à quoi sert ce dépôt.>
+
+Ce dépôt est piloté par le workflow multi-agents (`/project-manager`, Project Manager V3). Les commandes, la stack et les règles vivent dans les fichiers ci-dessous ; ne pas les dupliquer ici.
+
+## Repères
+
+- Configuration du workflow (registre de work items, profil) : `.claude/project-manager.config.json`
+- Stack : `STACK_SPEC.md`
+- Règles durables : `ai_rules/INDEX.md` (règles chargées automatiquement : `.claude/rules/ai-rules*.md`, générées — ne pas éditer)
+- État opérationnel : `ai_memory/REPO_STATE.md`
+
+## Commandes
+
+- Installer : …
+- Tests : …
+- Lint : …
+
+<!-- Si le projet garde une carte de lecture AGENT.md, ajouter la ligne suivante : @AGENT.md -->

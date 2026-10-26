@@ -1,0 +1,46 @@
+# Ce dépôt peut être cloné directement comme ~/.claude : Claude Code y écrit aussi des données
+# PERSONNELLES (identifiants .credentials.json, settings.json, transcriptions projects/, history.jsonl,
+# backups/, plans/, plugins/, caches…). Liste blanche stricte : tout est ignoré, sauf les fichiers du kit.
+# Vos propres agents, skills ou règles ajoutés plus tard restent ignorés (jamais publiés par erreur).
+/*
+!/.gitignore
+!/README.md
+!/CLAUDE.md
+!/VERSION
+!/CHANGELOG.md
+!/install.sh
+!/rollback.sh
+!/docs/
+!/templates/
+!/adapters/
+!/tests/
+!/optional-agents/
+
+!/skills/
+/skills/*
+!/skills/project-manager/
+
+!/rules/
+/rules/*
+!/rules/00-kit-workflow.md
+
+!/agents/
+/agents/*
+!/agents/backend-reviewer-analyst.md
+!/agents/code-base-analyst.md
+!/agents/developer.md
+!/agents/devops-engineer.md
+!/agents/django-reviewer.md
+!/agents/explorer.md
+!/agents/feature-lead.md
+!/agents/frontend-reviewer-analyst.md
+!/agents/memory-cleaner.md
+!/agents/rules-curator.md
+!/agents/solution-architect.md
+!/agents/verifier.md
+
+# jamais : caches Python, fichiers de l'installateur
+__pycache__/
+*.pyc
+*.kit-new
+*.pmv3-tmp

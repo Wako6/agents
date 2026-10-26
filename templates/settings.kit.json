@@ -1,0 +1,36 @@
+{
+  "_comment": "SNIPPET générique à fusionner À LA MAIN (jamais par l'installateur) dans ~/.claude/settings.json ou .claude/settings.json. Les listes allow/ask/deny se COMBINENT entre niveaux ; deny gagne toujours. Les règles Write(path) ne matchent jamais : utiliser Edit(path). Les autorisations propres à une stack (ex. python manage.py test) vont dans le settings du projet, pas ici. Un projet qui a déjà des règles plus strictes les garde.",
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git ls-files:*)",
+      "Bash(rg:*)",
+      "Bash(python3 -I *pm_config.py:*)",
+      "Bash(python3 -I *rules_sync.py --ai-rules ai_rules --out .claude/rules --check:*)"
+    ],
+    "ask": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(glab mr create:*)",
+      "Bash(glab issue create:*)",
+      "Bash(glab issue update:*)",
+      "Bash(glab issue close:*)",
+      "Bash(glab api:*)",
+      "Bash(python3 -I *rules_sync.py --ai-rules ai_rules --out .claude/rules --write:*)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git stash:*)",
+      "Bash(glab mr merge:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(rm -rf:*)",
+      "Edit(.claude/rules/ai-rules*.md)"
+    ]
+  }
+}
