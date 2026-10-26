@@ -1,6 +1,6 @@
 # Project Manager V3 — Unified (Claude Code)
 
-Version **3.0.0-rc1** (candidate). Kit d'orchestration multi-agents pour [Claude Code](https://code.claude.com) : un seul skill `project-manager` qui pilote une équipe d'agents spécialisés, tient l'état du projet dans des fichiers du dépôt et soumet chaque opération sensible à votre accord.
+Version **3.1.0-rc1** (candidate). Kit d'orchestration multi-agents pour [Claude Code](https://code.claude.com) : un seul skill `project-manager` qui pilote une équipe d'agents spécialisés, tient l'état du projet dans des fichiers du dépôt et soumet chaque opération sensible à votre accord.
 
 Cette branche (`claude`) a la forme exacte d'un dossier `~/.claude/` : elle peut être clonée directement à cet emplacement pour une **première installation**, ou installée de façon non destructive dans une configuration existante.
 
@@ -24,6 +24,7 @@ Vous parlez en français ou en anglais ; le PM choisit le flux, les rôles et le
 - **Règles natives Claude Code** : règle globale du kit, règles de projet générées depuis `ai_rules/` par `rules_sync.py`.
 - **Vérification indépendante** (`verifier`) et revues spécialisées en lecture seule.
 - **Garde-fous** : un accord explicite par opération sortante (commit, push, MR/PR, issue), aucun merge par l'IA, aucun accès aux secrets, garde-fous des projets jamais modifiés, sous-agents sans accès aux skills.
+- **Orchestration multi-agents (pilote, opt-in)** pour les projets à registre local : débat Claude–Codex borné à 3 tours, décision humaine si désaccord, plan avec détection des collisions, deux équipes parallèles en worktrees isolés, vérification indépendante, revue croisée, intégration **locale** sur accord explicite, arrêt des relances dès qu'une cause d'échec se répète (`scripts/pmx.py`, `docs/PILOT-CLAUDEX.md`). Inactif tant qu'un projet n'active pas `orchestration.enabled`.
 - **Installateur non destructif** avec manifeste, sauvegardes, conflits, `--dry-run`, `--merge`, `--force`, verrou d'interruption, et **rollback**.
 
 ## 3. Architecture
@@ -35,16 +36,18 @@ Vous parlez en français ou en anglais ; le PM choisit le flux, les rôles et le
 │   ├── SKILL.md
 │   ├── references/                 runbook, work-items, backend-ledger, backend-gitlab, multi-team,
 │   │                               problem-solver, memory-clean, rules-wiki, review-triage,
-│   │                               project-config, extension-points, session-brief, spec-template
-│   ├── scripts/                    pm_config.py (configuration de projet), rules_sync.py (règles)
+│   │                               project-config, extension-points, session-brief, spec-template,
+│   │                               orchestration-pilot (opt-in)
+│   ├── scripts/                    pm_config.py (configuration de projet), rules_sync.py (règles),
+│   │                               pmx.py (orchestrateur pilote, opt-in)
 │   └── hooks/review-guard.sh       garde-fou des agents de revue
 ├── agents/                         12 agents (découverts par Claude Code)
 ├── rules/00-kit-workflow.md        règle globale (chargée dans toutes les sessions)
 ├── optional-agents/                4 agents optionnels (Flutter, SPIP) — non chargés par défaut
-├── adapters/                       generic/ (registre local) · gitlab-multi-team/ (exemple GitLab)
+├── adapters/                       generic/ (registre local) · gitlab-multi-team/ (exemple GitLab) · pilot-claudex/ (orchestration opt-in)
 ├── templates/                      project-rules/, settings.kit.json, CLAUDE.md.template, ai_rules-example/, mcp…
 ├── install.sh · rollback.sh        installation non destructive et retour arrière
-├── tests/run.sh                    suite de tests en bac à sable
+├── tests/run.sh                    suite de tests en bac à sable (+ tests/pilot/ : orchestrateur, agents factices ; validation réelle opt-in)
 └── docs/                           audit, matrice V1/V2/V3, arbitrages, installation, migration, rollback, tests, risques, extensions
 ```
 
@@ -146,13 +149,16 @@ cd /chemin/du/projet
 
 ## 12. Feuille de route — Claudex et orchestration multi-agents
 
-Rien de ce qui suit n'est implémenté ; le PM fonctionne sans Claudex ni Codex. Interfaces : `skills/project-manager/references/extension-points.md` ; plan : `docs/EXTENSION-PLAN.md`.
-1. Validation en session réelle sur un projet jetable.
-2. Reprise d'exécution multi-agents fondée sur les fichiers existants.
-3. Ressources et coûts déclaratifs (modèle et effort par rôle, plafonds).
-4. Revues croisées (revue adversariale Codex, revues entre équipes).
-5. Débat Claude–Codex via **Claudex** (brief → débat → décision humaine).
-6. Planification multi-équipes pour le registre local.
-7. Worktrees parallèles et intégration conditionnelle (preuve CI requise ; merge humain par défaut).
+Le PM fonctionne toujours sans Claudex ni Codex. Depuis 3.1.0-rc1, un **pilote opt-in** (`references/orchestration-pilot.md`, `scripts/pmx.py`, `docs/PILOT-CLAUDEX.md`) couvre une partie de la feuille de route, pour les projets à registre local uniquement. Interfaces : `skills/project-manager/references/extension-points.md` ; plan : `docs/EXTENSION-PLAN.md`.
+
+| # | Élément | État en 3.1.0-rc1 |
+|---|---|---|
+| 1 | Validation en session réelle sur un projet jetable | **fait pour le pilote** : cycle complet réel sur un projet fictif ; adaptateurs `codex-cli` et `claude-cli` exercés en réel |
+| 2 | Reprise d'exécution multi-agents fondée sur les fichiers existants | **pilote** : `pmx resume` (registre + journal d'exécution), interruption = tentative |
+| 3 | Ressources et coûts déclaratifs | **partiel** : `max_parallel`, `max_attempts` ; aucun plafond de coût |
+| 4 | Revues croisées | **pilote** : revue entre équipes en lecture seule ; la revue adversariale du plugin Codex n'est pas intégrée |
+| 5 | Débat Claude–Codex | **pilote** : protocole Claudex rejoué par `pmx`, borné à 3 tours ; l'application Claudex (TTY) n'est pas pilotée |
+| 6 | Planification multi-équipes pour le registre local | **pilote** : variante ledger d'I3 (WI parent/enfants, dépendances, collisions) |
+| 7 | Worktrees parallèles et intégration conditionnelle | **pilote** : intégration **locale** sur une branche non protégée, sur accord explicite ; pas de preuve CI, pas de push ni de MR, merge vers les branches protégées toujours humain |
 
 Invariants : registre unique, gates, Definition of Done, rédacteur unique de `ai_rules/`, un accord par opération sortante, aucun merge par l'IA.

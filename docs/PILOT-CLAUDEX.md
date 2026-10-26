@@ -1,26 +1,27 @@
-# Pilote « Claudex + orchestration multi-agents » — candidat `3.0.0-rc1+pilot.claudex.2`
+# Pilote « Claudex + orchestration multi-agents » — `3.1.0-rc1`
 
-Statut : **candidat, non intégré au V3 officiel**. Rien n'est installé dans `~/.claude` ; le V3 publié (`Wako6/agents`) n'est pas modifié.
+Statut : **pilote opt-in** (release candidate). Inactif tant qu'un projet ne déclare pas `orchestration.enabled: true` avec le backend `ledger` ; sinon le PM se comporte exactement comme en 3.0.0-rc1.
 
-## Contenu du candidat (diff vs `3.0.0-rc1`)
+## Contenu (diff vs `3.0.0-rc1`)
 
 | Fichier | Nature |
 |---|---|
 | `skills/project-manager/scripts/pmx.py` | **nouveau** — orchestrateur (Python stdlib) |
 | `skills/project-manager/references/orchestration-pilot.md` | **nouveau** — protocole du manager |
 | `adapters/pilot-claudex/` | **nouveau** — configuration, politique d'intégration, permissions pilote |
-| `tests/pilot/` | **nouveau** — 13 tests, agents factices |
+| `tests/pilot/` | **nouveau** — `test_pmx.py` (21 tests, agents factices, sans usage), `fake_agent.py`, `fixtures/` (rapports réels de Codex rejoués), `live_claude_cli.py` (validation réelle opt-in) |
 | `skills/project-manager/SKILL.md` | +1 ligne de chargement, +1 phrase de routage (opt-in) |
 | `references/extension-points.md`, `project-config.md`, `work-items.md` | mentions du pilote (I1–I4, I6, I7 ; clé `orchestration` ; champs ledger) |
 | `scripts/pm_config.py` | clé `orchestration` reconnue et validée (backend ledger exigé) |
 | `tests/run.sh` | section 11 (tests pilote) |
-| `VERSION` | `3.0.0-rc1+pilot.claudex.1` |
+| `scripts/pm_config.py`, `scripts/rules_sync.py` | mode `100755` (commit distinct ; oubli de l'amont `6e382fa`) |
+| `VERSION` | `3.1.0-rc1` |
 
 Sans `orchestration.enabled: true` dans un projet, le comportement est **identique** au V3.
 
 ## Utilisation (dépôt pilote uniquement)
 
-1. Copier `adapters/pilot-claudex/project-manager.config.json` et `pmx.integration-policy.json` dans `<repo>/.claude/` ; ajuster `worktree_root` et `verify_commands`.
+1. Copier `adapters/pilot-claudex/project-manager.config.json` et `pmx.integration-policy.json` dans `<repo>/.claude/` ; ajuster `worktree_root` et `verify_commands`. (`install.sh --adapter pilot-claudex` ne copie que `project-manager.config.json` : la politique d'intégration se copie à la main, et sans elle `pmx` refuse toute intégration.)
 2. Dans la session lead, demander au manager (« pm, cadre et lance … ») : il suit `orchestration-pilot.md`. À la main :
 
 ```bash
@@ -44,14 +45,14 @@ $PMX status --run <WI> ; $PMX evidence --run <WI> ; $PMX resume --run <WI>
 4. Validation réelle de `claude -p` (opt-in, consomme de l'usage ; CLI connectée par l'humain au préalable) :
    `PMX_LIVE=1 python3 -I -B tests/pilot/live_claude_cli.py <dossier-neuf>` → `RESULTS.md` / `RESULTS.json`.
 
-## Relances (depuis `pilot.claudex.2`)
+## Relances
 
 Chaque échec reçoit une signature normalisée (type, code de sortie, fichiers produits, identifiants, prose sans bruit). Une cause qui se répète → `ESCALATED` immédiat + `ai_doc/ESCALATION__<WI>.md` ; une cause nouvelle → relance, plafond 3 conservé. Seul `pmx reopen --by human:<nom>` rouvre une escalade.
 
 ## Limites connues
 
 - **Claudex n'est pas piloté** : son UI exige un TTY ; `pmx` rejoue son protocole (verbatim, marqueurs, lecture seule). Les fonctions propres à Claudex (`/implement`, mémoire `.claudex/`, interventions en cours de tour) ne sont pas utilisées.
-- **Équipe Claude `drop` non sandboxée** au niveau OS : consigne + contrôle de périmètre a posteriori (pendant `wait`, puis à la collecte) + arrêt. Préférer **`claude-cli`** (validé en réel, voir `docs/` du pilote) : refus par outil via `--settings` (secrets, `.claude/`, push, réseau, écriture hors worktree, commit), en plus du contrôle de périmètre.
+- **Équipe Claude `drop` non sandboxée** au niveau OS : consigne + contrôle de périmètre a posteriori (pendant `wait`, puis à la collecte) + arrêt. Préférer **`claude-cli`** (validé en réel avec `tests/pilot/live_claude_cli.py` : scénarios permissions, brief, fichiers, codes de sortie, parallélisme avec Codex, arrêt sur dépassement) : refus par outil via `--settings` (secrets, `.claude/`, push, réseau, écriture hors worktree, commit), en plus du contrôle de périmètre.
 - **`claude-cli` n'est pas un sandbox OS** non plus : les refus viennent des règles de permission de Claude Code ; une commande `Bash` autorisée (ex. `node --test`) peut écrire des effets de bord hors périmètre — ils sont détectés et arrêtés par `pmx`, pas empêchés.
 - **Rapprochement des causes rédigées par un agent** : heuristique (recouvrement de mots ≥ 0,5 à identifiants, code et fichiers identiques). Deux explications très différentes d'une même cause comptent comme deux causes : au pire une tentative de plus, jamais au-delà du plafond de 3.
 - **Codex `read-only` peut lire tout fichier du compte** (limite Codex documentée par Claudex) : ne jamais lancer de débat sur un dépôt contenant ou côtoyant des secrets professionnels.
@@ -59,14 +60,14 @@ Chaque échec reçoit une signature normalisée (type, code de sortie, fichiers 
 - **Collisions de globs** : détection conservatrice (même répertoire = collision) ; préférer des chemins explicites.
 - **Variante `gitlab-issues` non couverte** ; pas de push, pas de MR, pas de fusion vers une branche protégée — par conception.
 - `pmx` n'est pas un démon : la surveillance n'a lieu que pendant `wait` / `tick` / `report` / `resume`.
-- Deux échecs de `tests/run.sh` (« scripts exécutables », « modes 100755 ») existent **déjà** sur `3.0.0-rc1` (`pm_config.py`, `rules_sync.py` non exécutables en amont) ; non corrigés ici (hors périmètre).
+- Le pilote n'a été exercé que sur des projets **fictifs** (Node, sans dépendance) ; aucun projet réel ni GitLab.
+- Coûts non mesurés ni plafonnés par `pmx` (I6).
 
 ## Retour arrière
 
 | Ce qui a été fait | Comment revenir |
 |---|---|
-| Candidat (ce dépôt) | rien à défaire ailleurs : dépôt local isolé, sans remote. Supprimer le dossier suffit. |
-| Intégration au V3 officiel (si validée plus tard) | revert du commit de la MR ; aucune donnée de projet n'en dépend tant qu'aucun projet n'active `orchestration.enabled`. |
+| Version du kit | revenir à `3.0.0-rc1` (revert de la fusion, ou `rollback.sh --dest <DIR>` d'une installation) ; aucune donnée de projet n'en dépend tant qu'aucun projet n'active `orchestration.enabled`. |
 | Activation dans un projet | retirer la clé `orchestration` (ou `enabled: false`) : le manager repasse au workflow V3 ; `WORK_ITEMS.md` reste un ledger V3 valide (champs supplémentaires ignorés). |
 | Branches / worktrees d'un run | `git worktree list` puis, **avec accord humain**, `git worktree remove <chemin>` et `git branch -D pilot/<run>/…` (pmx ne supprime jamais rien). |
 | Intégration locale | `git update-ref refs/heads/pilot/integration <ancien> <nouveau>` (commande exacte consignée dans `ai_doc/DECISIONS__<WI>.md`). |
