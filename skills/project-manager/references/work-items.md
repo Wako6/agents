@@ -31,7 +31,7 @@ GitLab: exactly one state label at a time; every change removes the previous one
 
 ## Dependencies
 
-- Ledger: `depends_on: [WI-…]` in the entry; a dependent WI is delegated only when every dependency is `DONE` (or, if the plan says so explicitly, `READY_FOR_REVIEW`).
+- Ledger: `depends_on: [WI-…]` in the entry (pilot `orchestration-pilot.md`: also `parent`, `session`, `worktree`, `files_probably_touched`, `blocker`, `integrated`); a dependent WI is delegated only when every dependency is `DONE` (or, if the plan says so explicitly, `READY_FOR_REVIEW`).
 - GitLab: `Depends on: #NN (must be integrated into <integration>)` in the description; the dependent issue is created `blocked`; it becomes `todo` only on an **INTÉGRÉE** verdict (`backend-gitlab.md` § integration check). `review` is never enough.
 
 ## Role memory notes (both backends)

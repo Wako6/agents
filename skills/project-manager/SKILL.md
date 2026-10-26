@@ -26,6 +26,7 @@ Load the other references only when the phase needs them (keep context lean):
 | `references/rules-wiki.md` | rules intent, first contact, closure with `Proposed Rules`, 90-day review |
 | `references/review-triage.md` | after any reviewer report |
 | `references/extension-points.md` | `complex` task start, or the user mentions Claudex/Codex/teams/costs — detection only, **never required** |
+| `references/orchestration-pilot.md` | **pilot, opt-in**: configuration has `orchestration.enabled: true` (ledger backend) and the request is multi-feature / debate-then-build — replaces `multi-team.md` for that project |
 
 ## Cascade guard (technical and textual)
 
@@ -43,7 +44,7 @@ Classify before any tool call. Several intents → handle them in this order.
 |---|---|
 | **Status / resume** — « où en est-on », « reprends », « où en sont les équipes », « what's blocked » | *Resume the project* (runbook), then a status report (format below; multi-team format in `multi-team.md`). Propose the single next action. |
 | **Analysis / decision** — « analyse », « compare », « quelle approche », « pourquoi ça casse », failed attempt with unclear cause | `problem-solver.md` protocol: QUICK inline, or DEEP → `solution-architect` → `ai_doc/ANALYSIS__…`. No implementation. |
-| **Multi-feature / multi-team** — « cadrer », « planifier », « découpe en features », « lance les features » | `multi-team.md` flow (always tier `complex`; requires the `gitlab-issues` backend or the shared-registry interface — see the file). |
+| **Multi-feature / multi-team** — « cadrer », « planifier », « découpe en features », « lance les features » | `multi-team.md` flow (always tier `complex`; requires the `gitlab-issues` backend or the shared-registry interface — see the file). Ledger project with `orchestration.enabled` → `orchestration-pilot.md` (debate → decision → plan → two parallel teams → verify → cross review → controlled local integration). |
 | **Implementation** — feature, fix, refactor, tests, MR/PR, release, deployment | Core workflow below. |
 | **Memory housekeeping** — « nettoie la mémoire », « archive », « mémoire pleine » (`force` only if the user says it) | `memory-clean.md` protocol. Never automatic at the end of a task. |
 | **Rules / knowledge** — « note cette règle », « cette convention est obsolète » | `rules-curator` (`triage` in two steps, or `review`), then the rules sync. |

@@ -1,5 +1,7 @@
 # Extension points — interfaces only (V3)
 
+> **Pilot status (3.0.0-rc1+pilot.claudex.1):** I1, I2 (peer review), I3 (ledger variant), I4, I6 (`max_parallel`, `max_attempts`) and I7 have an opt-in pilot implementation, `scripts/pmx.py`, described in `orchestration-pilot.md`. Without `orchestration.enabled: true` the statement below still holds.
+>
 > **Nothing here is implemented.** The manager runs identically when no extension is present. Detection is cheap, silent, at most once per session, and recorded in `REPO_STATE.md` → `capabilities:`. An extension is only *proposed* in a plan (human gate); it never changes state by itself: it produces a file in `ai_doc/`; only the manager updates the registry, decides and delegates. No extension may weaken an approval rule.
 
 ## Detection
@@ -35,7 +37,7 @@ capabilities:
 ## I3 — Multi-team planning (generalisation)
 
 - Implemented today for `gitlab-issues` (`multi-team.md`).
-- `ledger` variant (not implemented): shared registry = `WORK_ITEMS.md` of the **main checkout**, written by the lead only; entries gain `depends_on`, `parent`, `session`, `worktree`, `files_probably_touched`; feature sessions report through notes, never edit the ledger. Must be specified and validated before use.
+- `ledger` variant (pilot: `orchestration-pilot.md`, fields below written by `pmx` in the lead session): shared registry = `WORK_ITEMS.md` of the **main checkout**, written by the lead only; entries gain `depends_on`, `parent`, `session`, `worktree`, `files_probably_touched`; feature sessions report through notes, never edit the ledger. Must be specified and validated before use.
 
 ## I4 — Parallel worktrees
 
