@@ -229,7 +229,7 @@ class Pilot(unittest.TestCase):
         time.sleep(0.5)
         out = self.pmx("resume", "--run", run, code=0).stdout
         self.assertIn("BLOCKED", out)
-        self.assertIn("interrompu", self.ledger())
+        self.assertIn("- blocker: interrupted", self.ledger())
 
     def test_10_drop_adapter_and_report(self):
         self.config({"team-a": {"adapter": "drop", "label": "claude-subagent"}, "team-b": team("ok")})
@@ -287,6 +287,95 @@ class Pilot(unittest.TestCase):
         self.pmx("review", "run", "--run", run, code=0)
         p = self.pmx("integrate", "--run", run, "--approved-by", "tester", code=1)
         self.assertIn("✘ cible non protégée (main)", p.stdout)
+
+    # ------------------------------------------------------------------ relances : cause répétée (non-régression)
+
+    def run_failing(self, behavior, max_attempts=3, files=("src/a.js",)):
+        self.config({"team-a": team(behavior), "team-b": team("ok")}, max_attempts=max_attempts)
+        run, wis = self.to_approved([self.task("a", "team-a", list(files))])
+        self.pmx("dispatch", "--run", run, code=0)
+        self.pmx("wait", "--run", run, "--interval", "0.3", code=0)
+        st = json.loads((self.root / "ai_memory" / "runs" / run / "run.json").read_text())
+        return run, next(iter(wis)), st
+
+    def test_15_same_cause_stops_after_second_attempt(self):
+        run, wi, st = self.run_failing("fail", max_attempts=3)
+        self.assertEqual(len(st["tasks"]["a"]["attempts"]), 2)  # et non 3 : la cause s'est répétée
+        self.assertEqual(self.status_of(wi), "ESCALATED")
+        self.assertIn("same cause repeated (attempts 1 and 2", self.ledger())
+        esc = (self.root / "ai_doc" / f"ESCALATION__{wi}.md").read_text()
+        self.assertIn("| 1 | exit-1 |", esc)
+        self.assertIn("| 2 | exit-1 |", esc)
+        self.assertIn("pmx reopen --by human", esc)
+        ev = (self.root / "ai_memory" / "runs" / run / "events.jsonl").read_text()
+        self.assertIn('"decision": "ESCALATED"', ev)
+        self.assertIn('"repeat_of": 1', ev)
+
+    def test_16_noise_is_normalized(self):
+        run, wi, st = self.run_failing("fail-noisy")
+        f = st["tasks"]["a"]["failures"]
+        self.assertNotEqual(f[0]["evidence"]["report_excerpt"], f[1]["evidence"]["report_excerpt"])  # textes bruts différents
+        self.assertEqual(f[0]["signature"], f[1]["signature"])  # même signature après normalisation
+        self.assertEqual(len(st["tasks"]["a"]["attempts"]), 2)
+        self.assertEqual(self.status_of(wi), "ESCALATED")
+
+    def test_17_distinct_causes_use_full_budget_of_three(self):
+        run, wi, st = self.run_failing("fail-distinct")
+        self.assertEqual(len(st["tasks"]["a"]["attempts"]), 3)  # plafond conservé
+        self.assertEqual(len({f["signature"] for f in st["tasks"]["a"]["failures"]}), 3)
+        self.assertEqual(self.status_of(wi), "ESCALATED")
+        self.assertIn("3 attempts failed (cap 3)", self.ledger())
+
+    def test_18_replay_of_real_demo_reports_stops_at_two(self):
+        run, wi, st = self.run_failing("blocked-demo")
+        self.assertEqual(len(st["tasks"]["a"]["attempts"]), 2)  # la démo réelle en avait consommé 3
+        f = st["tasks"]["a"]["failures"]
+        self.assertNotEqual(f[0]["signature"], f[1]["signature"])  # rédaction différente…
+        self.assertIn("match 0.83", self.ledger())  # …même cause, preuve du rapprochement enregistrée
+        self.assertEqual(f[1]["evidence"]["changed_files"], ["src/a.js"])
+
+    def test_19_escalated_is_never_relaunched_without_human(self):
+        run, wi, st = self.run_failing("fail")
+        n = len(st["tasks"]["a"]["attempts"])
+        for cmd in (("dispatch",), ("tick",), ("wait", "--interval", "0.2"), ("resume",)):
+            self.pmx(*cmd, "--run", run)
+        st = json.loads((self.root / "ai_memory" / "runs" / run / "run.json").read_text())
+        self.assertEqual(len(st["tasks"]["a"]["attempts"]), n)
+        self.assertEqual(self.status_of(wi), "ESCALATED")
+        self.pmx("reopen", "--run", run, "--task", "a", "--by", "lead", "--reason", "x", code=64)
+
+    def test_20_repeated_verifier_failure_escalates(self):
+        self.config({"team-a": team("ok"), "team-b": team("ok")})
+        t = self.task("a", "team-a", ["src/a.js"])
+        t["test_command"] = "grep -q never-there src/a.js"
+        run, wis = self.to_approved([t])
+        wi = next(iter(wis))
+        self.pmx("dispatch", "--run", run, code=0)
+        self.pmx("wait", "--run", run, "--interval", "0.3", code=0)
+        self.pmx("verify", "--run", run, code=1)
+        self.assertEqual(self.status_of(wi), "OPEN")  # premier échec : nouvelle cause, relance permise
+        self.pmx("wait", "--run", run, "--interval", "0.3", code=0)
+        self.pmx("verify", "--run", run, code=1)
+        self.assertEqual(self.status_of(wi), "ESCALATED")
+        self.assertIn("verifier-fail: grep -q never-there src/a.js → exit 1", self.ledger())
+
+    def test_21_normalization_keeps_significant_differences(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pmx", PMX)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        def rec(kind, text, exit=1, files=("src/a.js",)):
+            d = m.normalize_cause(text)
+            return {"kind": kind, "detail": d, "signature": f"{kind}: {d}", "evidence": {"exit": exit, "changed_files": list(files)}}
+        same = m.same_cause
+        self.assertTrue(same(rec("exit-1", "ERR at 2026-10-26T10:00:01Z sha deadbeef01 (3ms)"), rec("exit-1", "ERR at 2026-10-27T11:12:13Z sha 0123abcd99 (9ms)"))[0])
+        self.assertFalse(same(rec("exit-1", "test case_1 failed"), rec("exit-1", "test case_2 failed"))[0])  # test différent
+        self.assertFalse(same(rec("exit-1", "boom"), rec("exit-2", "boom"))[0])  # code de sortie différent
+        self.assertFalse(same(rec("reported-blocked", "cannot write report", 0), rec("reported-blocked", "cannot write report", 0, files=("src/b.js",)))[0])
+        self.assertFalse(same(rec("exit-1", "src/a.js: syntax error"), rec("exit-1", "src/b.js: syntax error"))[0])  # fichier différent
+        self.assertFalse(same(rec("verifier-fail", "node --test x → exit 1 :: not ok 3"), rec("verifier-fail", "node --test x → exit 1 :: not ok 4"))[0])
+        self.assertFalse(same(rec("interrupted", ""), rec("timeout", ""))[0])
+        self.assertTrue(same(rec("interrupted", ""), rec("interrupted", ""))[0])
 
 
 if __name__ == "__main__":

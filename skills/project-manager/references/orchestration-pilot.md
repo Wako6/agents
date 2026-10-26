@@ -38,8 +38,10 @@ Codes : 0 ok · 1 échec/refus · **2 décision humaine** · **3 échec critique
 ## Circuit breakers
 
 - Fichier hors périmètre, chemin sensible (secret, `.claude/`, hooks, settings, CI/production), suppression, ou même fichier modifié par deux équipes → **échec critique** : toutes les équipes arrêtées (process group), WI `BLOCKED`, worktrees conservés comme preuve, code 3. Équipe `drop` : fichier `STOP` écrit, le manager arrête le sous-agent.
-- Échec ou interruption d'une équipe → tentative suivante si `auto_retry` et `attempts < max_attempts` (3) ; sinon `ESCALATED` (cohérent avec `attempt_count ≥ 3`).
-- `verifier` FAIL → WI rouvert (nouvelle tentative) ou `ESCALATED`.
+- Échec d'une équipe ou `verifier` FAIL → **signature de cause** normalisée (type : `exit-N`, `reported-blocked`, `no-changes`, `interrupted`, `timeout`, `verifier-fail` ; texte sans horodatages, SHA, PID, durées, chemin du worktree de la tentative).
+- **Même cause qu'un échec antérieur → `ESCALATED` immédiatement**, sans attendre le plafond. Même cause = même type, même code de sortie, mêmes fichiers produits, mêmes identifiants (tests, chemins, valeurs), et une prose identique ou proche (recouvrement ≥ 0,5, score consigné). Une différence objective n'est jamais masquée.
+- Cause nouvelle → nouvelle tentative si `auto_retry`, dans la limite de `max_attempts` (3).
+- Toute escalade écrit `ai_doc/ESCALATION__<WI>.md` : tentatives, signatures, codes, fichiers, extraits de rapport, journaux. Seul `pmx reopen --by human:<nom> --reason …` rouvre le WI ; `dispatch`, `wait`, `tick` et `resume` ne le relancent jamais.
 - Intégration : conflit ou tests rouges → branche d'intégration inchangée, arbitrage humain.
 
 ## Permissions (pilote)

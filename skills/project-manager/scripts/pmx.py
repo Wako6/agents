@@ -1029,18 +1029,146 @@ def _finish_attempt(ctx, st, key, res):
         print(f"  ✔ {key} terminée → commit {att['commit'][:10]}")
         return
     att["result"] = "interrupted" if res.get("interrupted") else "failed"
-    att.setdefault("failure", "processus interrompu sans résultat" if res.get("interrupted") else f"exit {res.get('exit')}")
-    tries = len(t["attempts"]) - t.get("budget_base", 0)
-    ctx.event(run, "team_finished", task=key, wi=t["wi"], result=att["result"], reason=att["failure"], attempt=tries)
-    if tries >= ctx.o["max_attempts"]:
-        wi_set(ctx, t["wi"], status="ESCALATED", attempt_count=tries, blocker=f"{tries} attempts failed: {att['failure']}")
-        print(f"  ⛔ {key} ESCALATED après {tries} tentatives : {att['failure']}")
-    elif ctx.o["auto_retry"]:
-        wi_set(ctx, t["wi"], status="OPEN", attempt_count=tries, blocker=f"attempt {tries} {att['result']}: {att['failure']} (retry allowed)")
-        print(f"  ↻ {key} {att['result']} ({att['failure']}) → nouvelle tentative autorisée ({tries}/{ctx.o['max_attempts']})")
+    bad, paths = scope_check(ctx, t, wt, att["base"]) if pathlib.Path(wt).exists() else ([], set())
+    kind, detail, sig, evidence = failure_record(ctx, t, att, res, rtext, bad, paths)
+    att.update(failure=sig, failure_kind=kind)
+    ctx.event(run, "team_finished", task=key, wi=t["wi"], result=att["result"], reason=sig, attempt=att["n"])
+    decide_retry(ctx, st, key, {"attempt": att["n"], "kind": kind, "detail": detail, "signature": sig, "evidence": evidence, "ts": now()})
+
+
+# ---------------------------------------------------------------- causes d'échec (relances)
+
+# Ce que la normalisation efface : ce qui change d'une tentative à l'autre sans changer la cause.
+# Ce qu'elle garde : type d'échec, code de sortie, commande, nom de test, chemins relatifs, texte du message.
+NORMALIZERS = [
+    (r"\x1b\[[0-9;]*m", ""),                                             # couleurs ANSI
+    (r"\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(?:\.\d+)?z?", "<ts>"),        # horodatages
+    (r"\b[0-9a-f]{7,40}\b", "<sha>"),                                      # commits, arbres
+    (r"/\S*?\.worktrees/[a-z0-9-]+?-a\d+", "<worktree>"),                  # worktree propre à la tentative
+    (r"/tmp/\S+", "<tmp>"),
+    (r"\b(pid|duration_ms|attempt|tentative)\b\s*[:=#]?\s*\d+(?:\.\d+)?", r"\1 <n>"),
+    (r"\(\d+(?:\.\d+)?\s?m?s\)", "(<dur>)"),                                  # durées de test
+    (r"[`*>|]+", " "),                                                     # mise en forme Markdown (pas `_` : identifiants)
+    (r"\s+", " "),
+]
+STOPWORDS = {"status", "blocked", "done", "failed", "with", "that", "this", "only", "file", "from", "were", "have", "been",
+             "pour", "dans", "avec", "sans", "les", "des", "une", "est", "pas", "the", "and", "not", "but", "was"}
+NEAR_REPEAT = 0.5  # recouvrement minimal des mots-clés pour deux explications rédigées par un agent
+
+
+def normalize_cause(text):
+    t = (text or "").lower()
+    for pat, sub in NORMALIZERS:
+        t = re.sub(pat, sub, t)
+    return t.strip(" .;:-—")[:240]
+
+
+def report_blocker(rtext):
+    """Motif déclaré par l'équipe : ligne Status (hors « DONE ») + lignes Open blockers, sinon première ligne utile."""
+    lines = [l for l in rtext.splitlines() if l.strip()]
+    keep = [l for l in lines if re.search(r"status\W*\s*(blocked|failed)|open blockers", l, re.I)]
+    return " | ".join(keep or lines[:1])
+
+
+def failure_record(ctx, t, att, res, rtext, bad, paths):
+    """→ (kind, detail, signature, preuves). `kind` est structurel ; `detail` est normalisé."""
+    if res.get("interrupted"):
+        kind, detail = "interrupted", ""
+    elif res.get("exit") == 124:
+        kind, detail = "timeout", ""
+    elif bad:
+        kind, detail = "scope", "; ".join(bad)
+    elif res.get("exit") not in (0, None):
+        log = pathlib.Path(att["report"]).parent / f"team-a{att['n']}.log"
+        last = next((l for l in reversed((log.read_text(encoding="utf-8", errors="replace") if log.exists() else "").splitlines())
+                     if re.search(r"error|erreur|failed|not ok|denied|refus", l, re.I)), "")
+        kind, detail = f"exit-{res.get('exit')}", report_blocker(rtext) or last
+    elif re.search(r"Status\W{0,5}\s*BLOCKED", rtext):
+        kind, detail = "reported-blocked", report_blocker(rtext)
     else:
-        wi_set(ctx, t["wi"], status="BLOCKED", attempt_count=tries, blocker=att["failure"], restore_state="OPEN")
-        print(f"  ✘ {key} BLOCKED : {att['failure']}")
+        kind, detail = "no-changes", ""
+    detail = normalize_cause(detail)
+    evidence = {"exit": res.get("exit"), "changed_files": sorted(paths), "report_excerpt": tail(rtext, 15),
+                "report": att["report"], "log": str(pathlib.Path(att["report"]).parent / f"team-a{att['n']}.log")}
+    return kind, detail, f"{kind}: {detail}" if detail else kind, evidence
+
+
+def keywords(detail):
+    """Mots de prose (comparés de façon floue) et identifiants (noms de test, chemins, valeurs : comparés à l'identique)."""
+    toks = re.findall(r"[\wà-ÿ./-]+", detail)
+    ids = {w.strip(".-") for w in toks if re.search(r"[0-9_/]|\w\.\w", w)}
+    words = {w for w in toks if w not in ids and re.fullmatch(r"[a-zà-ÿ]{4,}", w) and w not in STOPWORDS}
+    return words, ids
+
+
+def same_cause(a, b):
+    """Même cause ? Exacte sur la signature ; « proche » seulement pour un motif rédigé par un agent, et seulement si
+    le type, le code de sortie et les fichiers produits sont identiques (une différence objective n'est jamais masquée)."""
+    # une différence objective n'est jamais masquée : code de sortie, fichiers produits (sauf travail partiel interrompu)
+    if a["evidence"]["exit"] != b["evidence"]["exit"]:
+        return False, 0.0
+    if a["kind"] not in ("interrupted", "timeout") and a["evidence"]["changed_files"] != b["evidence"]["changed_files"]:
+        return False, 0.0
+    if a["signature"] == b["signature"]:
+        return True, 1.0
+    agent_text = a["kind"] == "reported-blocked" or a["kind"].startswith("exit-")
+    if a["kind"] != b["kind"] or not agent_text:
+        return False, 0.0
+    (ka, ia), (kb, ib) = keywords(a["detail"]), keywords(b["detail"])
+    if ia != ib:
+        return False, 0.0
+    score = len(ka & kb) / len(ka | kb) if ka | kb else 1.0
+    return score >= NEAR_REPEAT, round(score, 2)
+
+
+def decide_retry(ctx, st, key, rec):
+    """Applique la politique de relance à un échec enregistré. Relance automatique seulement si : budget non épuisé,
+    `auto_retry`, et cause jamais vue depuis la dernière décision humaine. Sinon ESCALATED (ou BLOCKED), dossier écrit."""
+    t, run = st["tasks"][key], st["run"]
+    history = [x for x in t.setdefault("failures", []) if x["attempt"] > t.get("budget_base", 0)]
+    repeat = None
+    for prev in history:
+        hit, score = same_cause(prev, rec)
+        if hit:
+            repeat = (prev, score)
+            break
+    t["failures"].append(rec)
+    tries = len(t["attempts"]) - t.get("budget_base", 0)
+    if repeat:
+        why = f"same cause repeated (attempts {repeat[0]['attempt']} and {rec['attempt']}, match {repeat[1]}): {rec['signature']}"
+        status = "ESCALATED"
+    elif tries >= ctx.o["max_attempts"]:
+        why, status = f"{tries} attempts failed (cap {ctx.o['max_attempts']}): {rec['signature']}", "ESCALATED"
+    elif ctx.o["auto_retry"]:
+        why, status = f"attempt {tries} failed: {rec['signature']} (new cause, retry allowed)", "OPEN"
+    else:
+        why, status = rec["signature"], "BLOCKED"
+    fields = {"status": status, "attempt_count": tries, "blocker": why}
+    if status == "BLOCKED":
+        fields["restore_state"] = "OPEN"
+    if status != "OPEN":
+        fields["links"] = str(escalation_file(ctx, st, key, why))
+    wi_set(ctx, t["wi"], **fields)
+    ctx.event(run, "retry_decision", task=key, attempt=rec["attempt"], decision=status, signature=rec["signature"],
+              repeat_of=repeat[0]["attempt"] if repeat else None, match=repeat[1] if repeat else None)
+    icon = {"OPEN": "↻", "ESCALATED": "⛔", "BLOCKED": "✘"}[status]
+    print(f"  {icon} {key} → {status} : {why}")
+    return status
+
+
+def escalation_file(ctx, st, key, why):
+    """Dossier d'escalade (« present history and evidence ») : toutes les tentatives, leur signature, leurs preuves."""
+    t = st["tasks"][key]
+    rel = pathlib.Path("ai_doc") / f"ESCALATION__{t['wi']}.md"
+    out = [f"# Escalation — {t['wi']} — {t['title']}", "", f"Date: {now()} · Decision: {why}",
+           "Automatic retries stopped. Only a human decision reopens this work item (`pmx reopen --by human:<name> --reason …`).", "",
+           "| Attempt | Kind | Signature | Exit | Files produced | Report / log |", "|---|---|---|---|---|---|"]
+    for f in t.get("failures", []):
+        out.append(f"| {f['attempt']} | {f['kind']} | {f['signature'][:120]} | {f['evidence']['exit']} | {', '.join(f['evidence']['changed_files']) or '—'} | {f['evidence']['report']} · {f['evidence']['log']} |")
+    for f in t.get("failures", []):
+        out += ["", f"## Attempt {f['attempt']} — report excerpt", "```", f["evidence"]["report_excerpt"] or "(empty)", "```"]
+    write_atomic(ctx.root / rel, "\n".join(out) + "\n")
+    return rel
 
 
 def cmd_wait(ctx, a):
@@ -1105,8 +1233,13 @@ def cmd_verify(ctx, a):
             if verdict == "PASS":
                 wi_set(ctx, t["wi"], status="READY_FOR_REVIEW", links=str(note))
             else:
-                tries = len(t["attempts"]) - t.get("budget_base", 0)
-                wi_set(ctx, t["wi"], status="ESCALATED" if tries >= ctx.o["max_attempts"] else "OPEN", attempt_count=tries, blocker=f"verifier FAIL on {t['commit'][:10]}")
+                first = next((r for r in res if r["exit"] != 0), res[0])
+                err = next((l for l in first["output"].splitlines() if re.search(r"not ok|error|assert|fail", l, re.I)), "")
+                detail = normalize_cause(f"{first['command']} → exit {first['exit']} :: {err}")
+                st["tasks"][key]["attempts"][-1]["failure"] = f"verifier-fail: {detail}"
+                decide_retry(ctx, st, key, {"attempt": len(t["attempts"]), "kind": "verifier-fail", "detail": detail, "signature": f"verifier-fail: {detail}",
+                                            "evidence": {"exit": first["exit"], "changed_files": [], "report_excerpt": first["output"][-1500:],
+                                                         "report": str(note), "log": str(note)}, "ts": now()})
                 worst = EXIT_FAIL
             ctx.save_run(st)
         ctx.event(a.run, "verified", task=key, verdict=verdict, commit=t["commit"])
