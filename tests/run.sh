@@ -267,6 +267,9 @@ check "config existante : agent personnel homonyme → conflit, puis --force, pu
 check "installateur : exécution sans écriture → aucun nouveau manifeste" "cd '$SANDBOX' && n1=\$(ls '$HOME/.claude/.project-manager-v3-kit'/manifest-2*.tsv | wc -l) && '$KIT/install.sh' >/dev/null && n2=\$(ls '$HOME/.claude/.project-manager-v3-kit'/manifest-2*.tsv | wc -l) && [ \"\$n1\" = \"\$n2\" ]"
 check "~/.claude réel : chemins du kit (skills, agents, rules, CLAUDE.md, settings.json, état de l'installateur) inchangés" "[ \"\$(REAL_HOME='$REAL_HOME'; for p in skills agents rules CLAUDE.md settings.json .project-manager-v3-kit; do q=\"\$REAL_HOME/.claude/\$p\"; if [ -e \"\$q\" ]; then echo \"\$p \$(find \"\$q\" -type f 2>/dev/null | sort | xargs -r sha256sum 2>/dev/null | sha256sum)\"; else echo \"\$p absent\"; fi; done)\" = \"$REAL_BEFORE\" ]"
 
+echo "# 11. Pilote pmx (orchestration multi-agents, agents factices)"
+if python3 -I -B "$KIT/tests/pilot/test_pmx.py" >"$SANDBOX/pmx-tests.log" 2>&1; then ok "pilote pmx : $(grep -oE 'Ran [0-9]+ tests' "$SANDBOX/pmx-tests.log")"; else ko "pilote pmx (voir $SANDBOX/pmx-tests.log)"; fi
+check "pilote : adaptateur pilot-claudex valide (pm_config)" "d=\$(mktemp -d); git -C \$d init -q; mkdir -p \$d/.claude; cp '$KIT/adapters/pilot-claudex/project-manager.config.json' \$d/.claude/; $CFG validate --root \$d"
 echo
 echo "Résultat : $PASS réussis, $FAIL échoués, $SKIP ignorés  (sandbox: $SANDBOX)"
 echo "Rappel : tests statiques et simulés ; ils ne valident pas une session Claude Code réelle (voir docs/TESTS.md)."

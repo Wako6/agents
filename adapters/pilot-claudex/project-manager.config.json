@@ -1,0 +1,33 @@
+{
+  "schema": "pm-v3/1",
+  "_comment": "Pilote pmx : registre ledger, débat Claude–Codex borné, deux équipes parallèles. Copier dans <repo>/.claude/ d'un dépôt PILOTE (jamais un dépôt professionnel).",
+  "work_items": { "backend": "ledger" },
+  "reading_map": ["CLAUDE.md"],
+  "multi_team": { "enabled": true, "lead_in_main_checkout": true },
+  "language": { "user": "fr", "memory": "en" },
+  "orchestration": {
+    "enabled": true,
+    "max_parallel": 2,
+    "max_attempts": 3,
+    "auto_retry": true,
+    "team_timeout_s": 1800,
+    "debate": {
+      "max_rounds": 3,
+      "order": ["claude", "codex"],
+      "agents": { "claude": { "adapter": "drop" }, "codex": { "adapter": "codex-cli" } }
+    },
+    "teams": {
+      "team-codex":  { "adapter": "codex-cli", "label": "Codex CLI, sandbox workspace-write" },
+      "team-claude": { "adapter": "drop", "label": "sous-agent Claude Code (session lead)", "reviewer": { "adapter": "drop" } }
+    },
+    "cross_review": { "team-codex": "team-claude", "team-claude": "team-codex" },
+    "worktree_root": "../<repo>.worktrees",
+    "branch_prefix": "pilot/",
+    "integration_branch": "pilot/integration",
+    "protected_branches": ["main", "master", "develop", "production", "release/*", "hotfix/*"],
+    "verify_commands": ["<commande de test complète du projet>"],
+    "allowed_test_commands": [],
+    "sensitive_paths": [],
+    "integration_policy": ".claude/pmx.integration-policy.json"
+  }
+}

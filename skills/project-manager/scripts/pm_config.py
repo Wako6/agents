@@ -13,7 +13,7 @@ de signaux (ai_memory/, ai_rules/, CLAUDE.md).
 import argparse, json, pathlib, re, sys
 
 SCHEMA = "pm-v3/1"
-TOP_KEYS = {"schema", "work_items", "profile", "reading_map", "proof", "multi_team", "language", "_comment"}
+TOP_KEYS = {"schema", "work_items", "profile", "reading_map", "proof", "multi_team", "language", "orchestration", "_comment"}
 GITLAB_KEYS = {"referential", "project", "integration_branch", "state_labels", "production_branch"}
 BACKENDS = {"ledger", "gitlab-issues"}
 TICK = re.compile(r"`([^`]+)`")
@@ -122,6 +122,13 @@ def resolve(root, cfg_path):
         code, det = detect(root)
         if det.get("gitlab_signals"):
             warnings.append(f"signaux GitLab dans un projet ledger : {det['gitlab_signals']} (vérifier qu'aucun second registre n'est tenu)")
+    orch = cfg.get("orchestration")
+    if orch is not None:
+        out["orchestration"] = {"enabled": bool(orch.get("enabled")), "teams": sorted((orch.get("teams") or {}))}
+        if orch.get("enabled") and backend != "ledger":
+            errors.append("orchestration (pilote pmx) : backend ledger requis ; gitlab-issues reste sur multi-team.md")
+        if orch.get("enabled") and len(orch.get("teams") or {}) < 1:
+            errors.append("orchestration.enabled sans équipe déclarée")
     prof = cfg.get("profile")
     if prof and not (root / prof).exists():
         errors.append(f"profil introuvable : {prof}")

@@ -30,6 +30,7 @@
 - `gitlab`: either `referential` (values read from a Markdown table: a row whose first cell contains the given text; the value is the first back-quoted token of the second cell; `state_labels` takes all back-quoted tokens) **or** direct values — not both. A row that cannot be read is an **error**, never a silent default.
 - `profile`: optional; can only **add** constraints (proof hooks, command forms, branch rules). It never removes a rule of the skill.
 - `proof`: optional; when set, state changes towards verification/review require PASS on the current tree, and on the new `HEAD` after each commit.
+- `orchestration` (pilot, optional): `enabled`, `max_parallel`, `max_attempts`, `auto_retry`, `debate` (`max_rounds`, `order`, `agents`), `teams` (`<name>: {adapter: codex-cli|claude-cli|cmd|drop, label, model, settings, reviewer}`), `cross_review`, `worktree_root`, `branch_prefix`, `integration_branch`, `protected_branches`, `verify_commands`, `allowed_test_commands` (trusted test commands a plan may reference verbatim; with `verify_commands`, the only commands pmx ever runs — no shell, no metacharacters), `sensitive_paths` (adds to the built-in list, never removes), `integration_policy`. Requires `work_items.backend: "ledger"`. See `orchestration-pilot.md`.
 - Unknown keys are reported, not ignored silently.
 
 ## Resolution (read-only)

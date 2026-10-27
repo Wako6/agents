@@ -1,0 +1,13 @@
+{
+  "_comment": "Politique de permissions du pilote, passée explicitement à `claude -p --settings` (adaptateur claude-cli) ou copiée dans .claude/settings.json d'un dépôt PILOTE. Ne jamais fusionner dans ~/.claude/settings.json.",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": ["Read", "Grep", "Glob", "Edit(src/**)", "Edit(test/**)", "Write(src/**)", "Write(test/**)",
+              "Bash(node --test:*)", "Bash(npm test:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"],
+    "ask": ["Bash(git commit:*)", "Bash(git merge:*)", "Bash(rm:*)", "Bash(git worktree remove:*)", "Bash(git branch -D:*)"],
+    "deny": ["Read(./.env)", "Read(./.env.*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(~/.ssh/**)", "Read(~/.claude/.credentials.json)", "Read(~/.codex/auth.json)",
+             "Edit(.claude/**)", "Write(.claude/**)", "Edit(.git/**)", "Edit(**/hooks/**)", "Edit(.gitlab-ci.yml)",
+             "Bash(git push:*)", "Bash(glab:*)", "Bash(gh:*)", "Bash(git stash:*)", "Bash(git reset --hard:*)", "Bash(curl:*)", "Bash(wget:*)",
+             "WebFetch", "WebSearch"]
+  }
+}
