@@ -26,6 +26,7 @@
     "integration_branch": "pilot/integration",
     "protected_branches": ["main", "master", "develop", "production", "release/*", "hotfix/*"],
     "verify_commands": ["<commande de test complète du projet>"],
+    "allowed_test_commands": [],
     "sensitive_paths": [],
     "integration_policy": ".claude/pmx.integration-policy.json"
   }

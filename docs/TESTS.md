@@ -16,7 +16,7 @@ Résultats de la distribution : voir `RAPPORT_DISTRIBUTION.md` fourni avec l'arc
 | 8. Compatibilité : projet GitLab multi-équipes synthétique (+ copie d'un projet réel si `COMPAT_REPO`) | exécution sur fixture |
 | 9. Workflow GitLab simulé (create → doing → blocked → close) | glab contre faux serveur local |
 | 10. Distribution : arborescence `~/.claude`, liste blanche `.gitignore`, clone simulé, configuration existante, mise à jour par `pull`, rollback `--all`, absence de données sensibles, `~/.claude` réel intact | exécution en bac à sable |
-| 11. Pilote d'orchestration (`tests/pilot/test_pmx.py`, 21 tests) : registre unique, débat borné, plan (collisions, cycles, chemins sensibles), parallélisme, arrêt critique, relances (cause répétée, plafond), reprise, intégration locale contrôlée | agents factices, dépôts jetables |
+| 11. Pilote d'orchestration (`tests/pilot/test_pmx.py`, 29 tests) : registre unique, débat borné, plan (collisions, cycles, chemins sensibles), parallélisme, arrêt critique, relances (cause répétée, plafond), reprise, intégration locale contrôlée ; commandes de test non approuvées ou à substitution shell refusées ; checkout altéré (fichier, HEAD, références, nettoyage impossible) → `INCONCLUSIVE` avec preuve conservée ; intégration refusée sans confirmation au terminal (pseudo-terminal) | agents factices, dépôts jetables |
 
 Validation **réelle** du pilote, hors suite (opt-in, consomme de l'usage, CLI connectées par l'humain) : `PMX_LIVE=1 python3 -I -B tests/pilot/live_claude_cli.py <dossier-neuf>`.
 

@@ -9,7 +9,7 @@ Statut : **pilote opt-in** (release candidate). Inactif tant qu'un projet ne dé
 | `skills/project-manager/scripts/pmx.py` | **nouveau** — orchestrateur (Python stdlib) |
 | `skills/project-manager/references/orchestration-pilot.md` | **nouveau** — protocole du manager |
 | `adapters/pilot-claudex/` | **nouveau** — configuration, politique d'intégration, permissions pilote |
-| `tests/pilot/` | **nouveau** — `test_pmx.py` (21 tests, agents factices, sans usage), `fake_agent.py`, `fixtures/` (rapports réels de Codex rejoués), `live_claude_cli.py` (validation réelle opt-in) |
+| `tests/pilot/` | **nouveau** — `test_pmx.py` (29 tests, agents factices, sans usage), `fake_agent.py`, `fixtures/` (rapports réels de Codex rejoués), `live_claude_cli.py` (validation réelle opt-in) |
 | `skills/project-manager/SKILL.md` | +1 ligne de chargement, +1 phrase de routage (opt-in) |
 | `references/extension-points.md`, `project-config.md`, `work-items.md` | mentions du pilote (I1–I4, I6, I7 ; clé `orchestration` ; champs ledger) |
 | `scripts/pm_config.py` | clé `orchestration` reconnue et validée (backend ledger exigé) |
@@ -21,7 +21,7 @@ Sans `orchestration.enabled: true` dans un projet, le comportement est **identiq
 
 ## Utilisation (dépôt pilote uniquement)
 
-1. Copier `adapters/pilot-claudex/project-manager.config.json` et `pmx.integration-policy.json` dans `<repo>/.claude/` ; ajuster `worktree_root` et `verify_commands`. (`install.sh --adapter pilot-claudex` ne copie que `project-manager.config.json` : la politique d'intégration se copie à la main, et sans elle `pmx` refuse toute intégration.)
+1. Copier `adapters/pilot-claudex/project-manager.config.json` et `pmx.integration-policy.json` dans `<repo>/.claude/` ; ajuster `worktree_root`, `verify_commands` et `allowed_test_commands`. Ce sont les **seules** commandes de test que `pmx` exécutera : sans shell, une commande par entrée, sans `;`, `&`, `|`, `$`, backquote ni redirection. Un plan doit en citer une mot pour mot. (`install.sh --adapter pilot-claudex` ne copie que `project-manager.config.json` : la politique d'intégration se copie à la main, et sans elle `pmx` refuse toute intégration.)
 2. Dans la session lead, demander au manager (« pm, cadre et lance … ») : il suit `orchestration-pilot.md`. À la main :
 
 ```bash
@@ -36,8 +36,8 @@ $PMX dispatch --run <WI>                             # code 10 : brief de l'équ
 $PMX wait --run <WI>                                 # surveillance ; code 3 = arrêt critique
 $PMX report --run <WI> --task <clé> --status done --file <rapport>
 $PMX verify --run <WI> && $PMX review run --run <WI>
-$PMX integrate --run <WI> --dry-run
-$PMX integrate --run <WI> --approved-by <nom>        # après accord explicite
+$PMX integrate --run <WI> --dry-run                  # le manager s'arrête ici
+$PMX integrate --run <WI> --approved-by <nom>        # par l'humain, dans SON terminal : saisir « integrer <commit> »
 $PMX status --run <WI> ; $PMX evidence --run <WI> ; $PMX resume --run <WI>
 ```
 
@@ -62,6 +62,9 @@ Chaque échec reçoit une signature normalisée (type, code de sortie, fichiers 
 - `pmx` n'est pas un démon : la surveillance n'a lieu que pendant `wait` / `tick` / `report` / `resume`.
 - Le pilote n'a été exercé que sur des projets **fictifs** (Node, sans dépendance) ; aucun projet réel ni GitLab.
 - Coûts non mesurés ni plafonnés par `pmx` (I6).
+- **La confirmation d'intégration n'est pas une authentification.** `--approved-by` est un nom déclaré. La phrase saisie au terminal de contrôle et le refus en présence de variables d'agent (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `AI_AGENT`, `CODEX_SANDBOX*`) empêchent une intégration déclenchée par erreur ou par routine depuis l'outil Bash d'un agent. Ils n'arrêtent pas un processus malveillant du même utilisateur : il peut retirer ces variables, se créer un pseudo-terminal, ou écrire directement dans `.git`. Le risque reste borné : intégration **locale** seulement, sur une branche non protégée sans amont, réversible par `update-ref`, sans aucune opération distante. La vraie barrière, hors pilote, est côté serveur (branches protégées, revue obligatoire). `decide --by human:`, `plan approve --by` et `reopen --by human:` restent aussi des déclarations.
+- **Les commandes de test de confiance exécutent du code produit par les agents** : une commande approuvée (`node --test`, `npm test`) lance les fichiers livrés, voire des scripts de `package.json` si une tâche a ce fichier dans son périmètre. Le contrôle d'intégrité détecte les effets sur le checkout, les références et le checkout principal ; il ne détecte pas une écriture ailleurs sur le disque ni un accès réseau (pas de sandbox OS).
+- Contrôle d'intégrité : les fichiers ignorés par `.gitignore` ne sont pas vus. Une modification concurrente du checkout principal ou des références pendant les tests (par exemple un autre `pmx wait` qui commite une équipe) donne un faux positif `INCONCLUSIVE`, conservateur : lancer `verify` et `integrate` sans collecte en parallèle.
 
 ## Retour arrière
 

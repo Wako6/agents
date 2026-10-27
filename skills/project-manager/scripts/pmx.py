@@ -30,7 +30,7 @@ DEFAULTS = {
     "debate": {"max_rounds": 3, "order": ["claude", "codex"], "agents": {"claude": {"adapter": "drop"}, "codex": {"adapter": "codex-cli"}}},
     "teams": {}, "cross_review": {}, "worktree_root": None, "branch_prefix": "pilot/", "integration_branch": "pilot/integration",
     "protected_branches": ["main", "master", "develop", "production", "release/*", "hotfix/*"],
-    "verify_commands": [], "sensitive_paths": [], "integration_policy": ".claude/pmx.integration-policy.json",
+    "verify_commands": [], "allowed_test_commands": [], "sensitive_paths": [], "integration_policy": ".claude/pmx.integration-policy.json",
 }
 # Chemins qui exigent toujours une validation humaine (secrets, permissions, hooks/garde-fous, CI/production).
 SENSITIVE = [
@@ -38,6 +38,10 @@ SENSITIVE = [
     ("guardrail", [".claude/*", ".claude/**", ".git/*", ".githooks/*", ".husky/*", "hooks/*", "*/hooks/*", "*settings*.json", ".pre-commit-config.yaml", "CODEOWNERS", "ai_rules/*", ".claude/rules/*"]),
     ("production", [".gitlab-ci.yml", ".github/workflows/*", "deploy/*", "k8s/*", "helm/*", "terraform/*", "*.tf", "Dockerfile", "docker-compose*.yml"]),
 ]
+# Commandes de test : exécutées sans shell ; ces caractères signalent une tentative d'enchaînement ou de substitution.
+SHELL_META = re.compile(r"[;&|$`<>(){}\\\n\r]")
+# Variables posées par les CLI d'agents dans les commandes qu'elles lancent : une intégration réelle n'y est jamais confirmée.
+AGENT_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AI_AGENT", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
 
 
 # ---------------------------------------------------------------- utilitaires
@@ -382,6 +386,9 @@ def cmd_doctor(ctx, a):
     print(f"  worktrees : {ctx.wt_root} · intégration : {ctx.o['integration_branch']} (protégée : {ctx.is_protected(ctx.o['integration_branch'])})")
     for team, t in ctx.o["teams"].items():
         print(f"  équipe {team} : adaptateur {t.get('adapter')} ({t.get('label', '')})")
+    for c in trusted_commands(ctx) or ["(aucune : tout plan sera refusé)"]:
+        prob = command_problem(ctx, c) if trusted_commands(ctx) else "à déclarer dans verify_commands / allowed_test_commands"
+        print(f"  {'✘' if prob else '✔'} commande de test de confiance : {c}{' — ' + prob if prob else ''}")
     return EXIT_OK
 
 
@@ -661,6 +668,8 @@ def validate_plan(ctx, plan):
             errs.append(f"{t['key']} : clé invalide (minuscules, chiffres, tirets)")
         if t.get("team") and t["team"] not in ctx.o["teams"]:
             errs.append(f"{t['key']} : équipe inconnue {t['team']!r}")
+        if t.get("test_command") and (prob := command_problem(ctx, t["test_command"])):
+            errs.append(f"{t['key']} : {prob}")
         for f in t.get("files") or []:
             if f.startswith("/") or ".." in f.split("/"):
                 errs.append(f"{t['key']} : chemin hors dépôt {f!r}")
@@ -1211,17 +1220,79 @@ def cmd_wait(ctx, a):
 
 # ---------------------------------------------------------------- vérification indépendante (rôle verifier, mécanisé)
 
+def trusted_commands(ctx):
+    """Commandes de test de confiance : écrites par l'humain dans `.claude/project-manager.config.json` (chemin garde-fou,
+    jamais modifiable par une équipe). Un plan proposé par un agent ne peut que les référencer, pas en introduire."""
+    return list(dict.fromkeys(c for c in [*ctx.o["verify_commands"], *ctx.o["allowed_test_commands"]] if isinstance(c, str)))
+
+
+def command_problem(ctx, cmd):
+    """Raison de refuser une commande de test, ou None. Revérifiée à chaque exécution (run.json n'est pas une source de confiance)."""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return "commande de test vide"
+    if cmd not in trusted_commands(ctx):
+        return f"commande de test non approuvée (absente de verify_commands / allowed_test_commands) : {cmd!r}"
+    if SHELL_META.search(cmd):
+        return f"métacaractère shell interdit (commandes exécutées sans shell ; une commande par entrée) : {cmd!r}"
+    try:
+        shlex.split(cmd)
+    except ValueError as e:
+        return f"commande de test illisible ({e}) : {cmd!r}"
+    return None
+
+
 def run_checks(ctx, wt, commands, timeout):
+    bad = [p for p in map(lambda c: command_problem(ctx, c), commands) if p]
+    if bad:  # les appelants filtrent avant ; ceinture et bretelles
+        raise RuntimeError("; ".join(bad))
     results = []
     for c in commands:
         t0 = time.time()
         try:
-            p = subprocess.run(c, shell=True, cwd=str(wt), capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            p = subprocess.run(shlex.split(c), cwd=str(wt), capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
             rc, out = p.returncode, p.stdout + p.stderr
         except subprocess.TimeoutExpired:
             rc, out = 124, f"TIMEOUT {timeout}s"
+        except OSError as e:
+            rc, out = 127, f"{type(e).__name__}: {e}"
         results.append({"command": c, "exit": rc, "seconds": round(time.time() - t0, 2), "output": tail(out)})
     return results
+
+
+def repo_snapshot(ctx):
+    """Références et état du checkout principal : les commandes de test ne doivent modifier ni l'un ni l'autre."""
+    main = [l for l in git(ctx.root, "status", "--porcelain=v1", "-uall").splitlines() if not l[3:].startswith(("ai_memory/runs/", "ai_memory/.pmx.lock"))]
+    return {"refs": git(ctx.root, "for-each-ref", "--format=%(refname) %(objectname)").splitlines(), "main": main}
+
+
+def checkout_problems(ctx, wdir, head, before):
+    """Écarts d'intégrité après les tests d'un checkout jetable : HEAD déplacé, fichiers modifiés ou ajoutés, références ou
+    checkout principal touchés. Tout écart rend le verdict non concluant (jamais PASS)."""
+    probs, after = [], repo_snapshot(ctx)
+    cur = git(wdir, "rev-parse", "HEAD", check=False)
+    if cur != head:
+        probs.append(f"HEAD du checkout déplacé ({head[:10]} → {cur[:10] or 'illisible'})")
+    dirty = git(wdir, "status", "--porcelain=v1", "-uall", check=False).splitlines()
+    if dirty:
+        probs.append(f"checkout modifié par les commandes ({len(dirty)} chemin(s)) : {', '.join(dirty[:10])}")
+    refs = sorted(set(before["refs"]) ^ set(after["refs"]))
+    if refs:
+        probs.append(f"références git modifiées pendant les tests : {', '.join(refs[:10])}")
+    main = sorted(set(before["main"]) ^ set(after["main"]))
+    if main:
+        probs.append(f"checkout principal modifié pendant les tests : {', '.join(main[:10])}")
+    return probs
+
+
+def preserve_evidence(ctx, run, name, wdir, probs, res):
+    """Preuve écrite hors du checkout (conservé, jamais supprimé par pmx) : état, diff suivi, fichiers ajoutés, sorties."""
+    p = ctx.run_dir(run) / "integrity" / f"{name}.txt"
+    parts = [f"# {name} — {now()}", f"checkout conservé : {wdir}", "", "## Écarts", *[f"- {x}" for x in probs], "",
+             "## git status", git(wdir, "status", "--porcelain=v1", "-uall", check=False), "",
+             "## git diff HEAD (fichiers suivis)", git(wdir, "diff", "HEAD", check=False)[-200000:], "",
+             "## Commandes", *[f"$ {r['command']} → exit {r['exit']} ({r['seconds']}s)\n{r['output']}" for r in res]]
+    write_atomic(p, "\n".join(parts) + "\n")
+    return p
 
 
 def cmd_verify(ctx, a):
@@ -1231,24 +1302,43 @@ def cmd_verify(ctx, a):
     worst = EXIT_OK
     for key in keys:
         t = st["tasks"][key]
+        cmds = [t["test_command"]] + [c for c in ctx.o["verify_commands"] if c != t["test_command"]]
+        bad = [p for p in map(lambda c: command_problem(ctx, c), cmds) if p]
+        if bad:
+            ctx.event(a.run, "verify_refused", task=key, reasons=bad)
+            print(f"  ✘ {key} : vérification REFUSÉE, rien n'a été exécuté — {'; '.join(bad)}")
+            worst = EXIT_HUMAN
+            continue
         vdir = ctx.wt_root / f"_verify-{key}-{t['commit'][:8]}"
         if vdir.exists():
-            die(f"checkout de vérification déjà présent : {vdir}")
+            die(f"checkout de vérification déjà présent (preuve d'une vérification précédente ?) : {vdir}", EXIT_HUMAN)
+        before = repo_snapshot(ctx)
         git(ctx.root, "worktree", "add", "-q", "--detach", str(vdir), t["commit"])
-        cmds = [t["test_command"]] + [c for c in ctx.o["verify_commands"] if c != t["test_command"]]
         res = run_checks(ctx, vdir, cmds, ctx.o["verify_timeout_s"])
-        dirty = git(vdir, "status", "--porcelain")
-        verdict = "PASS" if all(r["exit"] == 0 for r in res) else "FAIL"
-        rm = subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", str(vdir)], capture_output=True, text=True)
+        probs = checkout_problems(ctx, vdir, t["commit"], before)
+        if not probs:
+            rm = subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", str(vdir)], capture_output=True, text=True)
+            if rm.returncode != 0 or vdir.exists():
+                probs.append(f"nettoyage du checkout impossible : {rm.stderr.strip() or 'répertoire toujours présent'}")
+        evidence = preserve_evidence(ctx, a.run, f"verify-{key}-{t['commit'][:8]}", vdir, probs, res) if probs else None
+        verdict = "INCONCLUSIVE" if probs else "PASS" if all(r["exit"] == 0 for r in res) else "FAIL"
         ev = "\n".join(f"$ {r['command']}  → exit {r['exit']} ({r['seconds']}s)\n{r['output']}" for r in res)
+        integ = "clean (HEAD, files, refs and main checkout unchanged; checkout removed)" if not probs else \
+            "ALTERED — " + " | ".join(probs) + f"\n- Checkout kept as evidence: {vdir}\n- Integrity evidence: {evidence}"
+        nxt = {"PASS": "cross review", "FAIL": "developer (new attempt)", "INCONCLUSIVE": "human triage (pmx reopen --by human:<name>) — no automatic retry"}[verdict]
         note = role_note(ctx, "verifier", t["wi"], f"# verifier note — {t['wi']}\n\n- Work item: {t['wi']}\n- Role: verifier (pmx, clean detached checkout of {t['commit'][:10]}, tree {t['tree'][:10]})\n"
-                         f"- Status: {verdict}\n- Commands run: {cmds}\n- Checkout left dirty by tests: {'yes' if dirty else 'no'}; removed: {'yes' if rm.returncode == 0 else 'no — ' + rm.stderr.strip()}\n"
-                         f"- Evidence:\n```\n{ev}\n```\n- Next actions: {'cross review' if verdict == 'PASS' else 'developer (new attempt)'}\n")
+                         f"- Status: {verdict}\n- Commands run (trusted, no shell): {cmds}\n- Checkout integrity: {integ}\n"
+                         f"- Evidence:\n```\n{ev}\n```\n- Next actions: {nxt}\n")
         with ctx.lock():
             st = ctx.load_run(a.run)
-            st["tasks"][key]["verify"] = {"verdict": verdict, "commit": t["commit"], "tree": t["tree"], "ts": now(), "note": str(note), "results": res}
+            st["tasks"][key]["verify"] = {"verdict": verdict, "commit": t["commit"], "tree": t["tree"], "ts": now(), "note": str(note), "results": res,
+                                          "integrity": probs, "evidence": str(evidence) if evidence else None}
             if verdict == "PASS":
                 wi_set(ctx, t["wi"], status="READY_FOR_REVIEW", links=str(note))
+            elif verdict == "INCONCLUSIVE":
+                # écart d'intégrité : signal de sécurité, pas un échec ordinaire → jamais de relance automatique
+                wi_set(ctx, t["wi"], status="BLOCKED", links=str(note), blocker=f"verifier INCONCLUSIVE: {probs[0]} — evidence {evidence}; human triage")
+                worst = EXIT_HUMAN
             else:
                 first = next((r for r in res if r["exit"] != 0), res[0])
                 err = next((l for l in first["output"].splitlines() if re.search(r"not ok|error|assert|fail", l, re.I)), "")
@@ -1257,10 +1347,14 @@ def cmd_verify(ctx, a):
                 decide_retry(ctx, st, key, {"attempt": len(t["attempts"]), "kind": "verifier-fail", "detail": detail, "signature": f"verifier-fail: {detail}",
                                             "evidence": {"exit": first["exit"], "changed_files": [], "report_excerpt": first["output"][-1500:],
                                                          "report": str(note), "log": str(note)}, "ts": now()})
-                worst = EXIT_FAIL
+                worst = worst if worst == EXIT_HUMAN else EXIT_FAIL
             ctx.save_run(st)
-        ctx.event(a.run, "verified", task=key, verdict=verdict, commit=t["commit"])
+        ctx.event(a.run, "verified", task=key, verdict=verdict, commit=t["commit"], integrity=probs)
         print(f"  {'✔' if verdict == 'PASS' else '✘'} {key} : verifier {verdict} ({t['commit'][:10]})")
+        for x in probs:
+            print(f"    ⚠ {x}")
+        if probs:
+            print(f"    checkout conservé : {vdir} · preuve : {evidence} · arbitrage humain")
     return worst
 
 
@@ -1341,15 +1435,32 @@ def _record_review(ctx, run, key, text, source):
 
 # ---------------------------------------------------------------- intégration locale contrôlée
 
+def agent_session():
+    """Variables d'environnement d'une CLI d'agent présentes dans ce processus (liste vide hors agent)."""
+    return [v for v in AGENT_ENV if os.environ.get(v)]
+
+
+def open_human_tty():
+    """Terminal de contrôle du processus, ou (None, raison). Ce n'est PAS une authentification : un garde-fou contre une
+    intégration réelle déclenchée par un agent (outil Bash sans terminal, ou variables d'agent présentes)."""
+    seen = agent_session()
+    if seen:
+        return None, f"session d'agent détectée ({', '.join(seen)}) : l'intégration réelle se lance par l'humain, dans son propre terminal"
+    try:
+        return os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY), None
+    except OSError as e:
+        return None, f"aucun terminal interactif ({e.strerror}) : l'intégration réelle se lance par l'humain, dans son propre terminal"
+
+
 def cmd_integrate(ctx, a):
     ctx.require_enabled()
     st = ctx.load_run(a.run)
     target = ctx.o["integration_branch"]
-    checks, fail = [], []
-    def c(ok, label):
+    checks, fail, human = [], [], []
+    def c(ok, label, needs_human=False):
         checks.append(("✔" if ok else "✘") + " " + label)
         if not ok:
-            fail.append(label)
+            (human if needs_human else fail).append(label)
     pol_p = ctx.root / ctx.o["integration_policy"]
     pol = json.loads(pol_p.read_text(encoding="utf-8")) if pol_p.exists() else {}
     c(bool(pol), f"politique explicite présente ({ctx.o['integration_policy']})")
@@ -1358,8 +1469,12 @@ def cmd_integrate(ctx, a):
     c(not ctx.is_protected(target), f"cible non protégée ({target})")
     upstream = subprocess.run(["git", "-C", str(ctx.root), "rev-parse", "--abbrev-ref", f"{target}@{{upstream}}"], capture_output=True, text=True)
     c(upstream.returncode != 0, "cible sans branche amont (aucun push possible par pmx, qui n'en contient aucun)")
+    tty = None
     if not a.dry_run:
-        c(bool(a.approved_by), "accord humain explicite (--approved-by)")
+        # --approved-by est une déclaration (nom consigné), pas une preuve : la preuve est la confirmation saisie au terminal
+        c(bool(a.approved_by), "accord humain déclaré (--approved-by)", needs_human=True)
+        tty, why = open_human_tty()
+        c(tty is not None, "confirmation humaine possible au terminal" + (f" — {why}" if why else ""), needs_human=True)
     # intégration par vague : les tâches prêtes (READY_FOR_REVIEW) dont les dépendances sont déjà intégrées (DONE)
     keys = [k for w in st["plan"]["waves"] for k in w if wi_status(ctx, st["tasks"][k]["wi"]) == "READY_FOR_REVIEW"]
     c(bool(keys), "au moins une tâche READY_FOR_REVIEW")
@@ -1373,17 +1488,22 @@ def cmd_integrate(ctx, a):
             names = git(ctx.root, "diff", "--name-only", f"{t['attempts'][-1]['base']}..{t['commit']}").split()
             outside = [n for n in names if not match_any(n, pol.get("path_allowlist", []))]
             c(not outside, f"{k} : chemins dans l'allow-list de la politique {outside or ''}")
+    cmds = list(dict.fromkeys(ctx.o["verify_commands"] + [st["tasks"][k]["test_command"] for k in keys]))
+    bad = [p for p in map(lambda x: command_problem(ctx, x), cmds) if p]
+    c(not bad, "commandes de test de confiance" + (f" — {'; '.join(bad)}" if bad else ""), needs_human=True)
     print("\n".join(checks))
-    if fail:
-        ctx.event(a.run, "integration_refused", failed=fail)
+    if fail or human:
+        if tty is not None:
+            os.close(tty)
+        ctx.event(a.run, "integration_refused", failed=fail + human)
         print("intégration REFUSÉE — rien n'a été modifié")
-        return EXIT_HUMAN if fail == ["accord humain explicite (--approved-by)"] else EXIT_FAIL
+        return EXIT_FAIL if fail else EXIT_HUMAN
     exists = subprocess.run(["git", "-C", str(ctx.root), "rev-parse", "--verify", "-q", f"refs/heads/{target}"], capture_output=True, text=True)
     old = exists.stdout.strip() if exists.returncode == 0 else None
     start = old or st["base"]
     iwt = ctx.wt_root / f"_integration-{int(time.time())}"
     git(ctx.root, "worktree", "add", "-q", "--detach", str(iwt), start)
-    merged = []
+    merged, keep = [], False
     try:
         for k in keys:
             t = st["tasks"][k]
@@ -1394,24 +1514,48 @@ def cmd_integrate(ctx, a):
                 print(f"✘ conflit à l'intégration de {k} — {target} inchangée ; arbitrage humain\n{tail(p.stdout + p.stderr, 20)}")
                 return EXIT_HUMAN
             merged.append(k)
-        cmds = list(dict.fromkeys(ctx.o["verify_commands"] + [st["tasks"][k]["test_command"] for k in keys]))
-        res = run_checks(ctx, iwt, cmds, ctx.o["verify_timeout_s"])
+        # candidat figé AVANT les tests : un test qui déplace HEAD ne peut pas changer ce qui sera intégré
         new, tree = git(iwt, "rev-parse", "HEAD"), git(iwt, "rev-parse", "HEAD^{tree}")
+        before = repo_snapshot(ctx)
+        res = run_checks(ctx, iwt, cmds, ctx.o["verify_timeout_s"])
         verdict = "PASS" if all(r["exit"] == 0 for r in res) else "FAIL"
         for r in res:
             print(f"  $ {r['command']} → exit {r['exit']}")
+        probs = checkout_problems(ctx, iwt, new, before)
+        if probs:
+            keep = True
+            ev = preserve_evidence(ctx, a.run, f"integration-{new[:10]}", iwt, probs, res)
+            ctx.event(a.run, "integration_integrity_failed", candidate=new, problems=probs, evidence=str(ev))
+            for x in probs:
+                print(f"  ⚠ {x}")
+            print(f"✘ intégrité du checkout d'intégration NON vérifiée — {target} inchangée ; checkout conservé : {iwt} · preuve : {ev} · arbitrage humain")
+            return EXIT_HUMAN
         if verdict != "PASS" or a.dry_run:
             ctx.event(a.run, "integration_dry_run" if a.dry_run else "integration_failed", verdict=verdict, candidate=new)
             print(f"{'simulation' if a.dry_run else 'ÉCHEC des tests'} : candidat {new[:10]} (tree {tree[:10]}) — {target} inchangée")
             return EXIT_OK if (a.dry_run and verdict == "PASS") else EXIT_FAIL
+        expected = f"integrer {new[:10]}"
+        os.write(tty, (f"\nIntégration locale demandée (déclarée par : {a.approved_by})\n  {target} : {(old or '(nouvelle)')[:10]} → {new[:10]} (tree {tree[:10]})\n"
+                       f"  tâches : {', '.join(merged)} · tests : {verdict} · aucune opération distante\nPour confirmer, tapez exactement : {expected}\n> ").encode("utf-8"))
+        answer = read_line(tty).strip()
+        confirmed = {"via": "tty", "tty": os.ttyname(tty) if os.isatty(tty) else "?", "os_user": pwd_name(), "phrase": expected}
+        os.close(tty)
+        tty = None
+        if answer != expected:
+            ctx.event(a.run, "integration_not_confirmed", candidate=new, approved_by=a.approved_by)
+            print(f"✘ confirmation absente ou incorrecte — {target} inchangée")
+            return EXIT_HUMAN
         # mise à jour atomique et conditionnelle de la seule branche d'intégration locale
-        git(ctx.root, "update-ref", "-m", f"pmx integrate {a.run} approved-by {a.approved_by}", f"refs/heads/{target}", new, old or "")
+        git(ctx.root, "update-ref", "-m", f"pmx integrate {a.run} approved-by {a.approved_by} (tty-confirmed)", f"refs/heads/{target}", new, old or "")
     finally:
-        subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", "--force", str(iwt)], capture_output=True)
+        if tty is not None:
+            os.close(tty)
+        if not keep:
+            subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", "--force", str(iwt)], capture_output=True)
     with ctx.lock():
         st = ctx.load_run(a.run)
-        st.setdefault("integrations", []).append({"target": target, "commit": new, "merged": merged, "approved_by": a.approved_by, "ts": now()})
-        st["integration"] = {"target": target, "previous": old, "commit": new, "tree": tree, "approved_by": a.approved_by, "ts": now(), "results": res, "merged": merged}
+        st.setdefault("integrations", []).append({"target": target, "commit": new, "merged": merged, "approved_by": a.approved_by, "confirmation": confirmed, "ts": now()})
+        st["integration"] = {"target": target, "previous": old, "commit": new, "tree": tree, "approved_by": a.approved_by, "confirmation": confirmed, "ts": now(), "results": res, "merged": merged}
         for k in merged:
             wi_set(ctx, st["tasks"][k]["wi"], status="DONE", integrated=f"{target}@{new[:10]}", blocker="—")
         if all(wi_status(ctx, t["wi"]) == "DONE" for t in st["tasks"].values()):
@@ -1419,10 +1563,31 @@ def cmd_integrate(ctx, a):
         ctx.save_run(st)
         p = ctx.root / "ai_doc" / f"DECISIONS__{st['parent_wi']}.md"
         prev = p.read_text(encoding="utf-8") if p.exists() else f"# Decision log — {st['parent_wi']}\n"
-        write_atomic(p, prev.rstrip() + f"\n\n## {now()} — local integration\n- Approved by: {a.approved_by}\n- Target: {target} {old[:10] if old else '(new)'} → {new[:10]} (tree {tree[:10]})\n- Merged: {merged}\n- Tests on merged tree: {verdict}\n- Rollback: `git update-ref refs/heads/{target} {old or '<delete branch by hand>'} {new}`\n")
-    ctx.event(a.run, "integrated", target=target, commit=new, previous=old, approved_by=a.approved_by, merged=merged)
+        write_atomic(p, prev.rstrip() + f"\n\n## {now()} — local integration\n- Approved by (declared): {a.approved_by}\n"
+                     f"- Confirmation: typed on the controlling terminal ({confirmed['tty']}, OS user {confirmed['os_user']}) — a guard against agent-triggered integration, not an authentication\n"
+                     f"- Target: {target} {old[:10] if old else '(new)'} → {new[:10]} (tree {tree[:10]})\n- Merged: {merged}\n- Tests on merged tree: {verdict}; checkout integrity: clean\n"
+                     f"- Rollback: `git update-ref refs/heads/{target} {old or '<delete branch by hand>'} {new}`\n")
+    ctx.event(a.run, "integrated", target=target, commit=new, previous=old, approved_by=a.approved_by, confirmation=confirmed, merged=merged)
     print(f"✔ intégré dans {target} : {(old or 'nouvelle')[:10]} → {new[:10]} · aucune fusion vers {st['base_branch']} (humaine uniquement)")
     return EXIT_OK
+
+
+def read_line(fd, limit=200):
+    buf = b""
+    while len(buf) < limit and not buf.endswith(b"\n"):
+        ch = os.read(fd, 1)
+        if not ch:
+            break
+        buf += ch
+    return buf.decode("utf-8", "replace")
+
+
+def pwd_name():
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        return str(os.getuid())
 
 
 # ---------------------------------------------------------------- état, preuves, reprise

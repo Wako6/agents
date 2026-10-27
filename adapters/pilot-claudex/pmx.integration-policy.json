@@ -1,5 +1,5 @@
 {
-  "_comment": "Politique explicite d'intégration du pilote. Sans ce fichier, pmx refuse toute fusion. L'accord humain (--approved-by) reste exigé à chaque intégration.",
+  "_comment": "Politique explicite d'intégration du pilote. Sans ce fichier, pmx refuse toute fusion. Chaque intégration réelle est lancée par l'humain dans son propre terminal (--approved-by <nom> + phrase de confirmation saisie) ; jamais depuis une session d'agent.",
   "mode": "local-only",
   "target_branch": "pilot/integration",
   "path_allowlist": ["src/*", "src/**", "test/*", "test/**"],
