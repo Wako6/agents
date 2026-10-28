@@ -19,7 +19,7 @@ ledger) — pmx n'en crée pas d'autre ; l'état technique d'exécution (PID, wo
 Codes de sortie : 0 ok · 1 échec / refus · 2 décision humaine requise · 3 échec critique (équipes arrêtées)
 · 10 en attente d'un agent externe (drop) · 64 usage.
 """
-import argparse, datetime, fcntl, fnmatch, json, os, pathlib, re, shlex, shutil, signal, subprocess, sys, time
+import argparse, datetime, fcntl, fnmatch, hashlib, json, os, pathlib, re, shlex, shutil, signal, subprocess, sys, time, urllib.parse
 
 SCHEMA = "pm-v3/1"
 EXIT_OK, EXIT_FAIL, EXIT_HUMAN, EXIT_CRITICAL, EXIT_WAIT, EXIT_USAGE = 0, 1, 2, 3, 10, 64
@@ -30,12 +30,12 @@ DEFAULTS = {
     "debate": {"max_rounds": 3, "order": ["claude", "codex"], "agents": {"claude": {"adapter": "drop"}, "codex": {"adapter": "codex-cli"}}},
     "teams": {}, "cross_review": {}, "worktree_root": None, "branch_prefix": "pilot/", "integration_branch": "pilot/integration",
     "protected_branches": ["main", "master", "develop", "production", "release/*", "hotfix/*"],
-    "verify_commands": [], "allowed_test_commands": [], "sensitive_paths": [], "integration_policy": ".claude/pmx.integration-policy.json",
+    "mode": None, "confinement": None, "verify_commands": [], "allowed_test_commands": [], "sensitive_paths": [], "integration_policy": ".claude/pmx.integration-policy.json",
 }
 # Chemins qui exigent toujours une validation humaine (secrets, permissions, hooks/garde-fous, CI/production).
 SENSITIVE = [
     ("secret", [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*secret*", "*credential*", "*token*", ".npmrc", ".pypirc", ".netrc"]),
-    ("guardrail", [".claude/*", ".claude/**", ".git/*", ".githooks/*", ".husky/*", "hooks/*", "*/hooks/*", "*settings*.json", ".pre-commit-config.yaml", "CODEOWNERS", "ai_rules/*", ".claude/rules/*"]),
+    ("guardrail", [".claude/*", ".claude/**", ".git/*", ".git", "*/.git", "*/.git/*", ".gitattributes", ".gitmodules", ".githooks/*", ".husky/*", "hooks/*", "*/hooks/*", "*settings*.json", ".pre-commit-config.yaml", "CODEOWNERS", "ai_rules/*", ".claude/rules/*"]),
     ("production", [".gitlab-ci.yml", ".github/workflows/*", "deploy/*", "k8s/*", "helm/*", "terraform/*", "*.tf", "Dockerfile", "docker-compose*.yml"]),
 ]
 # Commandes de test : exécutées sans shell ; ces caractères signalent une tentative d'enchaînement ou de substitution.
@@ -59,8 +59,20 @@ def die(msg, code=EXIT_FAIL):
     sys.exit(code)
 
 
+# Git lancé par pmx touche des contenus écrits par les équipes : aucun hook (y compris post-checkout, post-commit,
+# reference-transaction), aucun fsmonitor, aucune configuration globale ou système (pilotes de filtre ou de diff, textconv,
+# alias), aucun transport réseau. La configuration locale du dépôt reste celle de l'humain (jamais modifiable par une équipe).
+GIT_SAFE = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-c", "core.sshCommand=false"]
+
+
+def git_env(extra=None):
+    e = {k: v for k, v in os.environ.items() if k not in ("GIT_EXTERNAL_DIFF", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_DIR", "GIT_WORK_TREE")}
+    e.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}, **(extra or {}))
+    return e
+
+
 def git(root, *args, check=True, env=None):
-    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=env)
+    p = subprocess.run([*GIT_SAFE, "-C", str(root), *args], capture_output=True, text=True, env=git_env(env))
     if check and p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} → {p.returncode}: {p.stderr.strip()}")
     return p.stdout.strip()
@@ -156,6 +168,9 @@ class Ctx:
             die("orchestration.enabled=false dans la configuration : le workflow V3 standard s'applique", EXIT_USAGE)
         if not self.o.get("teams"):
             die("orchestration.teams vide", EXIT_USAGE)
+        probs = bypass_problems(self) + mode_problems(self)
+        if probs:
+            die("configuration refusée — " + " ; ".join(probs), EXIT_USAGE)
 
     def lock(self):
         self.am.mkdir(exist_ok=True)
@@ -313,13 +328,225 @@ def role_note(ctx, role, wi, body):
 
 # ---------------------------------------------------------------- adaptateurs d'agents
 
+# ---------------------------------------------------------------- profils d'exécution et garde-fous des permissions natives
+
+HYBRID = "host-agents+docker-verification"
+# Drapeaux ou réglages qui désactivent les permissions ou le sandbox natifs d'une CLI : jamais acceptés, quel que soit le mode.
+BYPASS = re.compile(r"dangerously|bypass(?:Permissions|-approvals)|--yolo\b|danger-full-access|sandbox_mode\s*=\s*\"?danger", re.I)
+HOST_ADAPTERS = ("codex-cli", "claude-cli", "drop", "cmd")
+
+
+def agent_configs(ctx):
+    """(nom, configuration) de chaque agent lancé par pmx : équipes, reviewers, débatteurs."""
+    out = []
+    for name, t in ctx.o["teams"].items():
+        out.append((f"équipe {name}", t))
+        if isinstance(t.get("reviewer"), dict):
+            out.append((f"reviewer de {name}", t["reviewer"]))
+    for side, d in ((ctx.o.get("debate") or {}).get("agents") or {}).items():
+        out.append((f"débat {side}", d))
+    return out
+
+
+def bypass_problems(ctx):
+    """Contournements des permissions natives dans les configurations d'agents (argv, modèle, réglages claude)."""
+    probs = []
+    for who, c in agent_configs(ctx):
+        if BYPASS.search(json.dumps({k: v for k, v in c.items() if k != "label"})):
+            probs.append(f"{who} : contournement des permissions ou du sandbox natifs refusé")
+        if c.get("adapter") == "claude-cli" and c.get("settings"):
+            sp = (ctx.root / c["settings"]).resolve()
+            try:
+                txt = sp.read_text(encoding="utf-8")
+                mode = (json.loads(txt).get("permissions") or {}).get("defaultMode")
+            except (OSError, ValueError) as e:
+                probs.append(f"{who} : réglages {c['settings']} illisibles ({type(e).__name__})")
+                continue
+            if mode not in (None, "default", "acceptEdits", "plan", "dontAsk") or BYPASS.search(txt.replace("dangerously", "")):
+                probs.append(f"{who} : defaultMode {mode!r} refusé dans {c['settings']}")
+    return probs
+
+
+def mode_problems(ctx):
+    """Exigences du profil déclaré (`orchestration.mode`). Profil hybride : agents sur l'hôte avec leurs permissions natives,
+    vérification et tests d'intégration uniquement en conteneur isolé, isolation exigée par la politique d'intégration."""
+    m = ctx.o.get("mode")
+    if m in (None, "default"):
+        return []
+    if m != HYBRID:
+        return [f"mode inconnu {m!r} (default | {HYBRID})"]
+    probs = []
+    kind, _d, rerrs = verify_runner(ctx)
+    if kind != "docker":
+        probs.append("mode hybride : verify_runner.adapter = docker obligatoire")
+    probs += rerrs
+    pol_p = ctx.root / ctx.o["integration_policy"]
+    try:
+        pol = json.loads(pol_p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pol = {}
+    if pol.get("require_isolated_verification") is not True:
+        probs.append(f"mode hybride : require_isolated_verification=true obligatoire dans {ctx.o['integration_policy']}")
+    if ctx.o.get("gateway"):
+        probs.append("mode hybride : orchestration.gateway non utilisée (agents sur l'hôte) — à retirer")
+    if not confined(ctx):
+        probs.append('mode hybride : confinement = "native" obligatoire (sandbox natifs des CLI, lectures limitées au worktree)')
+    for who, c in agent_configs(ctx):
+        if c.get("adapter") not in HOST_ADAPTERS:
+            probs.append(f"mode hybride : {who} doit tourner sur l'hôte ({'/'.join(HOST_ADAPTERS)}), pas {c.get('adapter')!r}")
+        if c.get("adapter") == "claude-cli":
+            sp = (ctx.root / c["settings"]).resolve() if c.get("settings") else None
+            deny = []
+            if sp and sp.exists():
+                try:
+                    deny = (json.loads(sp.read_text(encoding="utf-8")).get("permissions") or {}).get("deny") or []
+                except ValueError:
+                    pass
+            if not sp or not sp.exists():
+                probs.append(f"mode hybride : {who} sans réglages de permissions explicites (`settings`)")
+            elif not any(re.match(r"Bash\(docker[ :]", r) for r in deny):
+                probs.append(f"mode hybride : {who} — les réglages doivent refuser Bash(docker:*) (aucun accès Docker aux agents)")
+    return probs
+
+
+# ---------------------------------------------------------------- confinement natif des CLI (orchestration.confinement = "native")
+
+# Lectures refusées aux commandes de Claude (sandbox bubblewrap) ; le worktree est ré-autorisé par son chemin ABSOLU
+# (dans un fichier --settings, « . » désignerait le dossier du fichier de réglages, pas le worktree : vérifié en réel).
+CONFINED_DENY_READ = ["~/", "/mnt", "/run/WSL", "/mnt/wsl", "/var/run/docker.sock", "/run/docker.sock", "/tmp"]
+CLAUDE_MIN_VERSION = (2, 1, 257)  # permissions.blockReadsOutsideWorkingDirectories
+
+
+def confined(ctx):
+    return ctx.o.get("confinement") == "native"
+
+
+def codex_package_dir():
+    """Répertoire d'installation de Codex, seul chemin du HOME lisible dans son sandbox (Codex s'y ré-exécute)."""
+    exe = shutil.which("codex")
+    if not exe:
+        return None
+    real = str(pathlib.Path(exe).resolve())
+    if "/node_modules/@openai/codex/" in real:
+        p = pathlib.Path(real.split("/node_modules/@openai/codex/")[0] + "/node_modules/@openai/codex")
+    elif (m := re.match(r"^(.*/releases/[^/]+)/", real)):
+        p = pathlib.Path(m.group(1))
+    else:
+        p = pathlib.Path(real).parent
+    home = pathlib.Path(pwd_home()).resolve()
+    if p in (home, home / ".codex", pathlib.Path("/")) or (p / "auth.json").exists():
+        return None
+    return p
+
+
+def codex_profile_args(mode):
+    """Profil de permissions Codex (bêta, officiel) passé en ligne de commande : aucune lecture hors du worktree et des
+    chemins système minimaux, aucune écriture hors du worktree, ni /tmp, ni réseau. ~/.codex n'est ni lu ni modifié."""
+    pkg = codex_package_dir()
+    name, ext = ("pmx-ro", ":read-only") if mode == "read" else ("pmx-ws", ":workspace")
+    fs = {":root": "deny", ":minimal": "read", ":tmpdir": "deny", ":slash_tmp": "deny", str(pkg): "read"}
+    if mode == "read":
+        fs[":workspace_roots"] = "read"
+    inline = "{" + ", ".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in fs.items()) + "}"
+    return ["-c", f'permissions.{name}.extends="{ext}"', "-c", f"permissions.{name}.filesystem={inline}",
+            "-c", f"permissions.{name}.network.enabled=false", "-c", f'default_permissions="{name}"']
+
+
+def claude_confined_settings(ctx, acfg, cwd, mode, dest):
+    """Réglages claude générés pour UN appel : politique de l'équipe + sandbox imposé + lectures limitées au worktree."""
+    base = {}
+    if acfg.get("settings"):
+        base = json.loads((ctx.root / acfg["settings"]).read_text(encoding="utf-8"))
+    if "sandbox" in base:
+        die(f"réglages {acfg.get('settings')} : bloc `sandbox` réservé à pmx en confinement natif", EXIT_USAGE)
+    perms = dict(base.get("permissions") or {})
+    perms["blockReadsOutsideWorkingDirectories"] = True
+    w = str(pathlib.Path(cwd).resolve())
+    base["permissions"] = perms
+    base["sandbox"] = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
+                       "filesystem": {"denyRead": CONFINED_DENY_READ, "allowRead": [w], "allowWrite": [w] if mode != "read" else []},
+                       "network": {"allowedDomains": []}}
+    write_atomic(dest, json.dumps(base, indent=1, ensure_ascii=False) + "\n")
+    return dest
+
+
+def confinement_problems(ctx):
+    """Préflight avant tout lancement d'agent réel : prérequis présents et sandbox Codex effectivement fermé (essai sans
+    modèle). Toute anomalie = arrêt explicite, jamais d'exécution non isolée."""
+    if not confined(ctx):
+        return []
+    adapters = {c.get("adapter") for _w, c in agent_configs(ctx)}
+    probs = [f"{t} absent (prérequis du sandbox natif)" for t in ("bwrap", "socat") if not shutil.which(t)]
+    for who, c in agent_configs(ctx):
+        if c.get("adapter") == "claude-cli" and c.get("settings"):
+            try:
+                if "sandbox" in json.loads((ctx.root / c["settings"]).read_text(encoding="utf-8")):
+                    probs.append(f"{who} : bloc `sandbox` interdit dans {c['settings']} (généré par pmx)")
+            except (OSError, ValueError):
+                probs.append(f"{who} : réglages {c['settings']} illisibles")
+    if "claude-cli" in adapters:
+        v = subprocess.run(["claude", "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL) if shutil.which("claude") else None
+        m = re.match(r"(\d+)\.(\d+)\.(\d+)", v.stdout.strip()) if v and v.returncode == 0 else None
+        if not m or tuple(map(int, m.groups())) < CLAUDE_MIN_VERSION:
+            probs.append(f"Claude Code ≥ {'.'.join(map(str, CLAUDE_MIN_VERSION))} requis (blockReadsOutsideWorkingDirectories)")
+    if "codex-cli" in adapters:
+        if not codex_package_dir():
+            probs.append("installation de Codex introuvable ou non confinable")
+        else:
+            canary = ctx.am / f".pmx-confinement-{os.getpid()}"
+            ws = canary / "ws"
+            try:
+                ws.mkdir(parents=True, exist_ok=True)
+                (ws / "inside.txt").write_text("in\n")
+                (canary / "outside.txt").write_text("CANARY\n")
+                run = lambda cmd: subprocess.run(["codex", "sandbox", *codex_profile_args("write"), "-P", "pmx-ws", "-C", str(ws), "--", "sh", "-c", cmd],
+                                                 capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL, env=agent_env())
+                ok_in = run("cat inside.txt && echo w > written.txt")
+                ok_out = run(f"cat {shlex.quote(str(canary / 'outside.txt'))}")
+                if ok_in.returncode != 0 or not (ws / "written.txt").exists():
+                    probs.append(f"sandbox Codex inutilisable (worktree inaccessible) : {(ok_in.stderr or ok_in.stdout).strip()[:200]}")
+                if ok_out.returncode == 0 or "CANARY" in ok_out.stdout:
+                    probs.append("sandbox Codex NON fermé : lecture hors worktree possible")
+            except (OSError, subprocess.TimeoutExpired) as e:
+                probs.append(f"préflight du sandbox Codex impossible ({type(e).__name__})")
+            finally:
+                shutil.rmtree(canary, ignore_errors=True)
+    return probs
+
+
+_CONFINEMENT_OK = False
+
+
+def require_confinement(ctx):
+    """Une fois par processus pmx, avant le premier lancement d'agent."""
+    global _CONFINEMENT_OK
+    if _CONFINEMENT_OK or not confined(ctx):
+        return
+    probs = confinement_problems(ctx)
+    _CONFINEMENT_OK = not probs
+    if probs:
+        die("confinement natif indisponible — aucun agent lancé : " + " ; ".join(probs), EXIT_USAGE)
+
+
+def agent_env():
+    """Environnement des agents : sans le canal d'interop Windows (WSL_INTEROP)."""
+    return {k: v for k, v in os.environ.items() if k not in ("WSL_INTEROP",)}
+
+
 def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):
     """Commande d'un agent, ou None pour un agent externe (« drop » : fichiers échangés avec la session lead)."""
     a = acfg.get("adapter")
     prompt = pathlib.Path(prompt_file).read_text(encoding="utf-8")
     if a == "codex-cli":
-        argv = ["codex", "exec", "--sandbox", "read-only" if mode == "read" else "workspace-write", "--skip-git-repo-check",
-                "--ephemeral", "-C", str(cwd), "-o", str(out_file)]
+        if confined(ctx):  # profil de permissions : lectures limitées au worktree (remplace --sandbox, incompatible)
+            argv = ["codex", "exec", *codex_profile_args(mode), "--skip-git-repo-check", "--ephemeral", "-C", str(cwd), "-o", str(out_file)]
+        else:
+            argv = ["codex", "exec", "--sandbox", "read-only" if mode == "read" else "workspace-write", "--skip-git-repo-check",
+                    "--ephemeral", "-C", str(cwd), "-o", str(out_file),
+                    # durcissement explicite du sandbox natif, indépendant de ~/.codex/config.toml (jamais lu ni modifié) :
+                    # pas de réseau, et ni /tmp ni $TMPDIR inscriptibles — seul le worktree l'est
+                    "-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                    "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"]
         if acfg.get("model"):
             argv += ["-m", acfg["model"]]
         return argv + [prompt], False
@@ -327,7 +554,10 @@ def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):
         tools = "Read,Grep,Glob" if mode == "read" else "Read,Grep,Glob,Edit,Write,Bash"
         argv = ["claude", "-p", prompt, "--output-format", "text", "--tools", tools,
                 "--permission-mode", "default" if mode == "read" else "acceptEdits"]
-        if acfg.get("settings"):  # politique pilote passée explicitement, jamais la config globale
+        if confined(ctx):  # réglages générés pour cet appel, hors du worktree, à côté du prompt
+            dest = pathlib.Path(prompt_file).with_name(pathlib.Path(prompt_file).name + ".claude-settings.json")
+            argv += ["--settings", str(claude_confined_settings(ctx, acfg, cwd, mode, dest))]
+        elif acfg.get("settings"):  # politique pilote passée explicitement, jamais la config globale
             argv += ["--settings", str((ctx.root / acfg["settings"]).resolve())]
         if acfg.get("model"):
             argv += ["--model", acfg["model"]]
@@ -340,7 +570,12 @@ def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):
     die(f"adaptateur inconnu : {a!r}", EXIT_USAGE)
 
 
-def run_agent_sync(ctx, acfg, prompt_file, out_file, cwd, mode, log_file, timeout):
+def run_agent_sync(ctx, acfg, prompt_file, out_file, cwd, mode, log_file, timeout, name=None, gateway=None):
+    if acfg.get("adapter") == "docker":
+        with open(log_file, "a", encoding="utf-8") as log:
+            rc, _ev = run_docker_agent(ctx, acfg, prompt_file, out_file, cwd, mode, log, timeout,
+                                       name or container_name(ctx, f"{mode}-{os.getpid()}-{time.time_ns()}"), gateway)
+        return rc
     argv, to_stdout = agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode)
     if argv is None:
         return None
@@ -349,7 +584,7 @@ def run_agent_sync(ctx, acfg, prompt_file, out_file, cwd, mode, log_file, timeou
         log.write(f"\n[{now()}] $ {' '.join(shlex.quote(x) for x in shown)}\n")
         log.flush()
         try:
-            p = subprocess.run(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+            p = subprocess.run(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, env=agent_env())
         except subprocess.TimeoutExpired:
             log.write(f"[{now()}] TIMEOUT {timeout}s\n")
             return 124
@@ -360,6 +595,468 @@ def run_agent_sync(ctx, acfg, prompt_file, out_file, cwd, mode, log_file, timeou
     if to_stdout:
         write_atomic(pathlib.Path(out_file), p.stdout)
     return p.returncode
+
+
+# ---------------------------------------------------------------- adaptateur docker (isolation système, opt-in)
+
+# Seules clés acceptées : aucune ne permet d'ajouter un montage, un argument `docker` libre, un réseau ou un privilège.
+DOCKER_DEFAULTS = {"image": None, "argv": None, "cpus": 1.0, "memory": "512m", "pids": 128, "tmpfs_size": "64m",
+                   "network": "none", "nofile": 1024, "agent_dir": None, "gateway_routes": None, "gateway_quota": None}
+# Répertoires du HOME jamais montés, même à l'intérieur d'un `agent_dir` (identifiants, clés, configuration des CLI).
+HOME_SECRETS = (".ssh", ".gnupg", ".aws", ".azure", ".config", ".docker", ".kube", ".claude", ".codex", ".netrc", ".git-credentials", ".npmrc", ".pypirc")
+DOCKER_LABEL = "pmx.pilot"
+
+
+def docker_settings(ctx, acfg, allow_gateway=True):
+    """→ (réglages, erreurs). Configuration explicite par équipe ; tout ce qui n'est pas listé est refusé.
+    Réseau : `none` (défaut) ou, pour une équipe et si `orchestration.gateway` est configurée, `gateway` (réseau interne
+    dédié, seule sortie : la passerelle pmx_gateway, routes `gateway_routes`)."""
+    d, errs = dict(DOCKER_DEFAULTS), []
+    raw = acfg.get("docker")
+    if not isinstance(raw, dict):
+        return d, ["adaptateur docker : bloc `docker` requis (image, argv)"]
+    for k in sorted(set(raw) - set(DOCKER_DEFAULTS)):
+        errs.append(f"docker : clé non autorisée {k!r} (aucun montage, argument ou privilège supplémentaire)")
+    d.update({k: v for k, v in raw.items() if k in DOCKER_DEFAULTS})
+    if not isinstance(d["image"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?", d["image"] or ""):
+        errs.append(f"docker : image invalide {d['image']!r}")
+    if not (isinstance(d["argv"], list) and d["argv"] and all(isinstance(x, str) for x in d["argv"])):
+        errs.append("docker : argv (liste de chaînes) requis")
+    if d["network"] == "gateway" and allow_gateway:
+        g, gerrs = gateway_settings(ctx)
+        errs += gerrs
+        routes = d["gateway_routes"]
+        if not (isinstance(routes, list) and routes and all(r in (g or {}).get("routes", {}) for r in routes)):
+            errs.append(f"docker : gateway_routes {routes!r} doit lister des routes de orchestration.gateway.routes")
+        q = d["gateway_quota"] or {}
+        if not (isinstance(q, dict) and all(k in ("max_requests", "max_bytes", "max_tokens") and isinstance(v, int) and v > 0 for k, v in q.items())):
+            errs.append(f"docker : gateway_quota invalide {q!r}")
+    elif d["network"] != "none":
+        errs.append(f"docker : réseau {d['network']!r} refusé (`none`, ou `gateway` pour une équipe avec orchestration.gateway)")
+    elif d["gateway_routes"] or d["gateway_quota"]:
+        errs.append("docker : gateway_routes / gateway_quota sans `network: gateway`")
+    if not (isinstance(d["cpus"], (int, float)) and 0.1 <= d["cpus"] <= (os.cpu_count() or 1)):
+        errs.append(f"docker : cpus hors bornes {d['cpus']!r}")
+    for k in ("memory", "tmpfs_size"):
+        if not (isinstance(d[k], str) and re.fullmatch(r"[1-9]\d{0,5}[mg]", d[k])):
+            errs.append(f"docker : {k} invalide {d[k]!r} (ex. 512m)")
+    if not (isinstance(d["pids"], int) and 16 <= d["pids"] <= 4096):
+        errs.append(f"docker : pids hors bornes {d['pids']!r}")
+    if not (isinstance(d["nofile"], int) and 64 <= d["nofile"] <= 65536):
+        errs.append(f"docker : nofile hors bornes {d['nofile']!r}")
+    if d["agent_dir"] is not None:
+        p = pathlib.Path(d["agent_dir"])
+        p = (p if p.is_absolute() else ctx.root / p).resolve()
+        d["agent_dir"] = str(p)
+        errs += [f"docker : agent_dir {p} — {e}" for e in mount_problems(ctx, p)]
+    return d, errs
+
+
+def mount_problems(ctx, p):
+    """Raisons de refuser un répertoire monté en lecture seule (programme de l'agent)."""
+    home = pathlib.Path(pwd_home()).resolve()
+    probs = []
+    if not p.is_dir():
+        probs.append("répertoire absent")
+    if "," in str(p) or "=" in str(p):
+        probs.append("caractère interdit dans le chemin (, =)")
+    for anc in (home, ctx.root, ctx.wt_root, pathlib.Path("/"), pathlib.Path("/var"), pathlib.Path("/run"), pathlib.Path("/etc")):
+        if p == anc or anc.is_relative_to(p):
+            probs.append(f"contient ou égale {anc} (HOME, dépôt, worktrees ou système)")
+    if p.is_relative_to(ctx.root) or p.is_relative_to(ctx.wt_root):
+        probs.append("dans le dépôt ou les worktrees (modifiable par une équipe)")
+    if any(part in HOME_SECRETS for part in p.parts) or (p.is_dir() and any((p / s).exists() for s in HOME_SECRETS)):
+        probs.append("chemin d'identifiants ou de configuration (.ssh, .claude, .codex, .docker…)")
+    if not probs:  # parcours borné : un programme d'agent est un petit répertoire
+        for i, x in enumerate(p.rglob("*")):
+            if i >= 5000:
+                probs.append("répertoire trop volumineux pour un programme d'agent (> 5000 entrées)")
+                break
+            if x.is_socket() or x.name == "docker.sock":
+                probs.append(f"contient une socket ({x})")
+                break
+    return probs
+
+
+def pwd_home():
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):
+        return os.path.expanduser("~")
+
+
+def container_name(ctx, label):
+    """Nom unique, préfixé et rattaché au dépôt : pmx ne touche jamais un conteneur qu'il n'a pas créé."""
+    import hashlib
+    h = hashlib.sha1(str(ctx.root).encode()).hexdigest()[:8]
+    return re.sub(r"[^a-z0-9_.-]", "-", f"pmx-{h}-{label}".lower())[:120]
+
+
+def docker_argv(ctx, d, name, argv_in, cwd, mode, labels, prompt_file=None, network="none", env=None, env_pass=()):
+    """mode : write (équipe), read (revue, /work en lecture seule), verify (commande de test de confiance, sans brief).
+    `env_pass` : noms de variables dont la valeur vient de l'environnement du client docker (jamais dans argv ni journal)."""
+    cwd = pathlib.Path(cwd).resolve()
+    for p in (cwd, prompt_file):
+        if p and ("," in str(p) or "=" in str(p)):
+            die(f"docker : caractère interdit (, =) dans {p}", EXIT_USAGE)
+    ro = ",readonly" if mode == "read" else ""
+    argv = ["docker", "create", "--name", name, "--label", f"{DOCKER_LABEL}=1", "--label", f"pmx.root={ctx.root}",
+            *[x for k, v in labels.items() for x in ("--label", f"pmx.{k}={v}")],
+            "--pull", "never", "--init", "--user", f"{os.getuid()}:{os.getgid()}", "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--network", network, "--ipc", "private",
+            "--cpus", str(d["cpus"]), "--memory", d["memory"], "--memory-swap", d["memory"], "--pids-limit", str(d["pids"]),
+            "--ulimit", f"nofile={d['nofile']}:{d['nofile']}",
+            "--tmpfs", f"/tmp:rw,noexec,nosuid,nodev,size={d['tmpfs_size']}",
+            "--env", "HOME=/tmp", "--env", "PMX_WORK=/work", "--env", f"PMX_MODE={mode}",
+            *[x for k, v in (env or {}).items() for x in ("--env", f"{k}={v}")], *[x for k in env_pass for x in ("--env", k)],
+            "--mount", f"type=bind,src={cwd},dst=/work{ro}"]
+    if (cwd / ".git").exists():  # le pointeur gitdir du worktree : jamais modifiable depuis le conteneur
+        argv += ["--mount", f"type=bind,src={cwd / '.git'},dst=/work/.git,readonly"]
+    if prompt_file:
+        argv += ["--env", "PMX_BRIEF=/pmx/brief.md", "--mount", f"type=bind,src={pathlib.Path(prompt_file).resolve()},dst=/pmx/brief.md,readonly"]
+    if d["agent_dir"]:
+        argv += ["--mount", f"type=bind,src={d['agent_dir']},dst=/agent,readonly"]
+    return argv + ["--workdir", "/work", d["image"], *argv_in]
+
+
+def docker_policy(inspect, d, cwd, prompt_file, mode, network="none"):
+    """Contrôle du conteneur CRÉÉ (avant démarrage), sur la configuration réelle du démon, pas sur la commande."""
+    hc, cfg, probs = inspect["HostConfig"], inspect["Config"], []
+    if hc.get("Privileged"):
+        probs.append("conteneur privilégié")
+    if hc.get("CapAdd") or "ALL" not in (hc.get("CapDrop") or []):
+        probs.append(f"capacités : add={hc.get('CapAdd')} drop={hc.get('CapDrop')}")
+    if not hc.get("ReadonlyRootfs"):
+        probs.append("système de fichiers racine en écriture")
+    if "no-new-privileges" not in " ".join(hc.get("SecurityOpt") or []):
+        probs.append("no-new-privileges absent")
+    if hc.get("NetworkMode") != network or len((inspect.get("NetworkSettings") or {}).get("Networks") or {}) > 1:
+        probs.append(f"réseau {hc.get('NetworkMode')} (attendu : {network})")
+    if network != "none":
+        ni = docker("network", "inspect", network)
+        if ni.returncode != 0 or not json.loads(ni.stdout)[0].get("Internal"):
+            probs.append(f"réseau {network} non interne (route sortante possible)")
+    if hc.get("PortBindings") or hc.get("PublishAllPorts"):
+        probs.append(f"ports publiés : {hc.get('PortBindings')}")
+    if hc.get("PidMode") or hc.get("IpcMode") not in ("private",) or hc.get("UsernsMode") or hc.get("Devices"):
+        probs.append(f"espaces de noms partagés ou périphériques : pid={hc.get('PidMode')!r} ipc={hc.get('IpcMode')!r} devices={hc.get('Devices')}")
+    if str(cfg.get("User")) in ("", "0", "root") or cfg.get("User", "").startswith("0:"):
+        probs.append(f"utilisateur root ({cfg.get('User')!r})")
+    if not hc.get("Memory") or not hc.get("NanoCpus") or not hc.get("PidsLimit"):
+        probs.append("limites CPU / mémoire / processus absentes")
+    w = str(pathlib.Path(cwd).resolve())
+    allowed = {(w, "/work", mode != "read"), (str(pathlib.Path(w) / ".git"), "/work/.git", False)}
+    if prompt_file:
+        allowed.add((str(pathlib.Path(prompt_file).resolve()), "/pmx/brief.md", False))
+    if d["agent_dir"]:
+        allowed.add((d["agent_dir"], "/agent", False))
+    for m in inspect.get("Mounts") or []:
+        if m.get("Type") != "bind" or (m.get("Source"), m.get("Destination"), bool(m.get("RW"))) not in allowed:
+            probs.append(f"montage inattendu : {m.get('Type')} {m.get('Source')} → {m.get('Destination')} rw={m.get('RW')}")
+        if "docker.sock" in str(m.get("Source")):
+            probs.append("socket Docker montée")
+    if set((hc.get("Tmpfs") or {})) != {"/tmp"}:
+        probs.append(f"tmpfs inattendus : {hc.get('Tmpfs')}")
+    return probs
+
+
+def docker(*args, timeout=60, env=None):
+    try:
+        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                              env={**os.environ, **env} if env else None)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(["docker", *args], 127, "", str(e))
+
+
+def docker_own(ctx, name):
+    """Inspect du conteneur s'il a été créé par pmx pour CE dépôt ; sinon None (jamais d'action sur un autre conteneur)."""
+    p = docker("inspect", "--type", "container", name)
+    if p.returncode != 0:
+        return None
+    info = json.loads(p.stdout)[0]
+    labels = info.get("Config", {}).get("Labels") or {}
+    return info if labels.get(DOCKER_LABEL) == "1" and labels.get("pmx.root") == str(ctx.root) else None
+
+
+def docker_stop(ctx, name):
+    info = docker_own(ctx, name)
+    if info and info["State"].get("Running"):
+        docker("kill", name)
+        return True
+    return False
+
+
+def docker_finalize(ctx, name, evidence_dir):
+    """Preuve (configuration réelle + état de sortie) écrite hors du conteneur, puis suppression du seul conteneur pmx."""
+    info = docker_own(ctx, name)
+    if not info:
+        return None
+    if info["State"].get("Running"):
+        docker("kill", name)
+        info = docker_own(ctx, name) or info
+    hc = info["HostConfig"]
+    ev = {"name": name, "image": info["Config"].get("Image"), "user": info["Config"].get("User"), "labels": info["Config"].get("Labels"),
+          "env_keys": sorted(e.split("=", 1)[0] for e in info["Config"].get("Env") or []),
+          "host_config": {k: hc.get(k) for k in ("Privileged", "ReadonlyRootfs", "CapAdd", "CapDrop", "SecurityOpt", "NetworkMode", "IpcMode",
+                                                 "PidMode", "UsernsMode", "Memory", "MemorySwap", "NanoCpus", "PidsLimit", "Ulimits", "Tmpfs", "Devices", "Binds")},
+          "mounts": [{k: m.get(k) for k in ("Type", "Source", "Destination", "RW")} for m in info.get("Mounts") or []],
+          "state": {k: info["State"].get(k) for k in ("ExitCode", "OOMKilled", "StartedAt", "FinishedAt", "Error")}}
+    p = pathlib.Path(evidence_dir) / f"container-{name}.json"
+    write_atomic(p, json.dumps(ev, indent=2, ensure_ascii=False) + "\n")
+    docker("rm", name)
+    return ev
+
+
+def docker_exec(ctx, d, name, argv_in, cwd, mode, timeout, evidence_dir, log=None, prompt_file=None, labels=None, gateway=None):
+    """create → contrôle de la configuration réelle → start --attach → preuve → suppression.
+    → (code, stdout, stderr, preuve, motif non concluant ou None). Seul `pmx` (session lead) appelle docker.
+    `gateway` = (réseau interne de l'équipe, jeton, routes) : variables d'accès à la passerelle, jeton hors argv."""
+    network, env, secret = "none", {}, {}
+    if gateway:
+        network, token, routes = gateway
+        env, secret = gateway_env(routes, token)
+    argv = docker_argv(ctx, d, name, argv_in, cwd, mode, {"name": name, "kind": mode, **(labels or {})}, prompt_file, network, env, tuple(secret))
+    if log:
+        log.write(f"[{now()}] $ {' '.join(shlex.quote(x) for x in argv)}\n")
+        log.flush()
+    p = docker(*argv[1:], env=secret)
+    if p.returncode != 0:
+        return 126, "", p.stderr, None, f"conteneur non créé : {p.stderr.strip()[:300]}"
+    info = docker_own(ctx, name)
+    probs = docker_policy(info, d, cwd, prompt_file, mode, network) if info else ["conteneur introuvable après création"]
+    if probs:
+        docker_finalize(ctx, name, evidence_dir)
+        return 126, "", "", None, f"politique d'isolation non respectée, conteneur non démarré : {probs}"
+    why = None
+    try:
+        r = subprocess.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        rc, out, err = r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        docker_stop(ctx, name)
+        rc, out, err, why = 124, "", f"TIMEOUT {timeout}s : conteneur arrêté", f"délai dépassé ({timeout}s)"
+    ev = docker_finalize(ctx, name, evidence_dir)
+    if ev is None:
+        why = why or "preuve du conteneur introuvable (supprimé par un tiers ?)"
+    elif ev["state"].get("OOMKilled"):
+        err += "\nOOMKilled: limite mémoire atteinte, conteneur arrêté par le noyau"
+        why = why or "limite mémoire atteinte (OOM)"
+    elif rc in (137, 143) or (ev["state"].get("ExitCode") in (137, 143)):
+        why = why or f"conteneur tué par un signal (code {rc})"
+    return rc, out, err, ev, why
+
+
+# ---------------------------------------------------------------- passerelle réseau des équipes (pmx_gateway, opt-in)
+
+GATEWAY_ROUTE_ENV = {  # variables posées dans le conteneur d'une équipe, par route (convention des CLI officielles)
+    "anthropic": ({"ANTHROPIC_BASE_URL": "http://pmx-gateway:8080/anthropic", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}, "ANTHROPIC_AUTH_TOKEN"),
+    "openai": ({"OPENAI_BASE_URL": "http://pmx-gateway:8080/openai/v1"}, "OPENAI_API_KEY"),
+}
+
+
+def gateway_settings(ctx):
+    """→ (réglages, erreurs) de `orchestration.gateway`. Aucun montage, port publié ou réseau sortant n'y est configurable
+    hormis `upstream_network` (réseau Docker existant, où se trouvent les amonts — internes pour les tests)."""
+    g = ctx.o.get("gateway")
+    if not isinstance(g, dict):
+        return None, ["orchestration.gateway absente"]
+    errs = [f"gateway : clé non autorisée {k!r}" for k in sorted(set(g) - {"image", "routes", "limits", "quota", "upstream_network", "keys_file", "token_ttl_s"})]
+    if not isinstance(g.get("image"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?", g["image"]):
+        errs.append(f"gateway : image invalide {g.get('image')!r}")
+    routes = g.get("routes")
+    if not isinstance(routes, dict) or not routes:
+        errs.append("gateway : routes requises")
+        routes = {}
+    for name, r in routes.items():
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", name) or not isinstance(r, dict):
+            errs.append(f"gateway : route invalide {name!r}")
+            continue
+        u = urllib.parse.urlsplit(str(r.get("upstream", "")))
+        if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password or u.query or u.fragment:
+            errs.append(f"gateway : amont invalide pour {name} ({r.get('upstream')!r})")
+        if set(r) - {"upstream", "allow_private", "auth_header", "key"}:
+            errs.append(f"gateway : clés non autorisées dans la route {name} : {sorted(set(r) - {'upstream', 'allow_private', 'auth_header', 'key'})}")
+        if r.get("auth_header", "x-api-key").lower() not in ("x-api-key", "authorization"):
+            errs.append(f"gateway : auth_header invalide pour {name}")
+    for k in ("limits", "quota"):
+        if not isinstance(g.get(k, {}), dict) or not all(isinstance(v, (int, float)) and v > 0 for v in g.get(k, {}).values()):
+            errs.append(f"gateway : {k} invalide")
+    if not isinstance(g.get("upstream_network"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", g.get("upstream_network") or ""):
+        errs.append("gateway : upstream_network (réseau Docker existant) requis")
+    kf = pathlib.Path(str(g.get("keys_file") or ""))
+    kf = (kf if kf.is_absolute() else ctx.root / kf).resolve()
+    if not g.get("keys_file") or not kf.is_file():
+        errs.append(f"gateway : keys_file absent ({g.get('keys_file')!r}) — fichier des clés AMONT dédiées, fourni par l'humain")
+    elif any(part in HOME_SECRETS for part in kf.parts) or kf.is_relative_to(ctx.wt_root):
+        errs.append(f"gateway : keys_file {kf} dans un chemin d'identifiants personnels ou un worktree")
+    return {**g, "keys_file": str(kf), "routes": routes}, errs
+
+
+def gateway_env(routes, token):
+    """→ (variables visibles, variables secrètes) pour le conteneur d'une équipe."""
+    env, secret = {"PMX_GATEWAY_URL": "http://pmx-gateway:8080"}, {"PMX_GATEWAY_TOKEN": token}
+    for r in routes:
+        visible, tok_var = GATEWAY_ROUTE_ENV.get(r, ({}, None))
+        env.update(visible)
+        if tok_var:
+            secret[tok_var] = token
+    return env, secret
+
+
+def gateway_dir(ctx, run):
+    return ctx.run_dir(run) / "gateway"
+
+
+def gateway_tokens_update(ctx, run, add=None, remove=None):
+    """tokens.json : empreintes SHA-256 seulement (jamais la valeur d'un jeton), remplacement atomique."""
+    p = gateway_dir(ctx, run) / "state" / "tokens.json"
+    cur = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"tokens": {}}
+    if add:
+        cur["tokens"].update(add)
+    for h in remove or ():
+        cur["tokens"].pop(h, None)
+    write_atomic(p, json.dumps(cur, indent=1) + "\n")
+
+
+def gateway_ensure(ctx, run):
+    """Démarre (si besoin) la passerelle du run : non-root, racine RO, cap-drop ALL, no-new-privileges, aucun port publié,
+    seul réseau initial = upstream_network ; configuration réelle contrôlée avant démarrage."""
+    g, errs = gateway_settings(ctx)
+    if errs:
+        die("passerelle refusée — " + " ; ".join(errs), EXIT_USAGE)
+    name, gdir = container_name(ctx, f"{run}-gateway"), gateway_dir(ctx, run)
+    info = docker_own(ctx, name)
+    if info and info["State"].get("Running"):
+        return name
+    if info:
+        docker_finalize(ctx, name, gdir)
+    ni = docker("network", "inspect", g["upstream_network"])
+    if ni.returncode != 0:
+        die(f"passerelle : réseau amont {g['upstream_network']} introuvable", EXIT_USAGE)
+    (gdir / "state").mkdir(parents=True, exist_ok=True)
+    (gdir / "log").mkdir(parents=True, exist_ok=True)
+    if not (gdir / "state" / "tokens.json").exists():
+        gateway_tokens_update(ctx, run)
+    write_atomic(gdir / "config.json", json.dumps({"routes": g["routes"], "limits": g.get("limits", {}), "quota": g.get("quota", {})}, indent=1) + "\n")
+    script = pathlib.Path(__file__).resolve().parent / "pmx_gateway.py"
+    mounts = [(str(script), "/gateway/pmx_gateway.py", False), (str(gdir / "config.json"), "/gateway/config.json", False),
+              (str(gdir / "state"), "/gateway/state", False), (g["keys_file"], "/gateway/keys.json", False), (str(gdir / "log"), "/log", True)]
+    argv = ["create", "--name", name, "--label", f"{DOCKER_LABEL}=1", "--label", f"pmx.root={ctx.root}", "--label", "pmx.kind=gateway", "--label", f"pmx.run={run}",
+            "--pull", "never", "--init", "--user", f"{os.getuid()}:{os.getgid()}", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--network", g["upstream_network"], "--ipc", "private", "--cpus", "0.5", "--memory", "128m", "--memory-swap", "128m", "--pids-limit", "64",
+            "--ulimit", "nofile=1024:1024", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m", "--env", "HOME=/tmp",
+            *[x for src, dst, rw in mounts for x in ("--mount", f"type=bind,src={src},dst={dst}" + ("" if rw else ",readonly"))],
+            g["image"], "python3", "-I", "-B", "/gateway/pmx_gateway.py", "--config", "/gateway/config.json", "--state", "/gateway/state",
+            "--keys", "/gateway/keys.json", "--log", "/log/gateway.jsonl"]
+    p = docker(*argv)
+    if p.returncode != 0:
+        die(f"passerelle non créée : {p.stderr.strip()[:300]}", EXIT_USAGE)
+    info = docker_own(ctx, name)
+    hc, probs = info["HostConfig"], []
+    if hc.get("Privileged") or hc.get("CapAdd") or "ALL" not in (hc.get("CapDrop") or []) or not hc.get("ReadonlyRootfs"):
+        probs.append("privilèges ou racine en écriture")
+    if hc.get("PortBindings") or hc.get("PublishAllPorts"):
+        probs.append("port publié (la passerelle ne doit pas être joignable depuis l'hôte ou le réseau local)")
+    if hc.get("NetworkMode") != g["upstream_network"] or str(info["Config"].get("User", "")).split(":")[0] in ("", "0", "root"):
+        probs.append("réseau ou utilisateur inattendu")
+    got = {(m.get("Source"), m.get("Destination"), bool(m.get("RW"))) for m in info.get("Mounts") or []}
+    if got != {(s, d, rw) for s, d, rw in mounts} or any("docker.sock" in str(m[0]) for m in got):
+        probs.append(f"montages inattendus : {sorted(got)}")
+    if probs:
+        docker_finalize(ctx, name, gdir)
+        die(f"passerelle : politique non respectée, non démarrée — {probs}", EXIT_CRITICAL)
+    if docker("start", name).returncode != 0:
+        die("passerelle : démarrage impossible", EXIT_USAGE)
+    log = gdir / "log" / "gateway.jsonl"
+    for _ in range(100):
+        if log.exists() and '"listening"' in log.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.1)
+    else:
+        docker_finalize(ctx, name, gdir)
+        die("passerelle : pas prête après 10 s", EXIT_USAGE)
+    ctx.event(run, "gateway_started", container=name, routes=sorted(g["routes"]), upstream_network=g["upstream_network"])
+    return name
+
+
+def gateway_attach_team(ctx, run, key, n, team, d):
+    """Réseau interne dédié à la tentative (aucune route sortante ; seuls l'équipe et la passerelle y sont) + jeton."""
+    import secrets as _secrets
+    gname = gateway_ensure(ctx, run)
+    net = container_name(ctx, f"{run}-{key}-a{n}-net")
+    p = docker("network", "create", "--internal", "--label", f"{DOCKER_LABEL}=1", "--label", f"pmx.root={ctx.root}", "--label", f"pmx.run={run}", net)
+    if p.returncode != 0 or docker("network", "connect", "--alias", "pmx-gateway", net, gname).returncode != 0:
+        die(f"réseau d'équipe {net} : création ou connexion impossible", EXIT_USAGE)
+    subnet = json.loads(docker("network", "inspect", net).stdout)[0]["IPAM"]["Config"][0]["Subnet"]
+    token = "pmxgw_" + _secrets.token_hex(24)
+    ttl = int((ctx.o.get("gateway") or {}).get("token_ttl_s") or ctx.o["team_timeout_s"] + 300)
+    h = hashlib.sha256(token.encode()).hexdigest()
+    gateway_tokens_update(ctx, run, add={h: {"team": team, "task": key, "attempt": n, "routes": d["gateway_routes"], "subnet": subnet,
+                                             "expires": time.time() + ttl, "quota": d["gateway_quota"] or {}}})
+    return {"network": net, "subnet": subnet, "token_fp": h[:8], "token_sha256": h, "routes": d["gateway_routes"]}, token
+
+
+def gateway_detach_team(ctx, run, gw):
+    """Révocation du jeton, déconnexion de la passerelle, suppression du réseau de la tentative (ressources pmx seulement)."""
+    gateway_tokens_update(ctx, run, remove=[gw["token_sha256"]])
+    ni = docker("network", "inspect", gw["network"])
+    if ni.returncode == 0:
+        labels = json.loads(ni.stdout)[0].get("Labels") or {}
+        if labels.get(DOCKER_LABEL) == "1" and labels.get("pmx.root") == str(ctx.root):
+            for cid in (json.loads(ni.stdout)[0].get("Containers") or {}):
+                docker("network", "disconnect", "--force", gw["network"], cid)
+            docker("network", "rm", gw["network"])
+
+
+def gateway_reap(ctx, run, st):
+    """Arrête la passerelle quand plus aucune tentative `gateway` n'est en cours (preuve gardée dans ai_memory/runs/<run>/gateway/)."""
+    if not ctx.o.get("gateway") or not any(t["attempts"] and t["attempts"][-1].get("gateway") for t in st["tasks"].values()):
+        return
+    live = [k for k, t in st["tasks"].items() if t["attempts"] and t["attempts"][-1].get("gateway") and wi_status(ctx, t["wi"]) == "IN_PROGRESS"]
+    name = container_name(ctx, f"{run}-gateway")
+    if not live and docker_own(ctx, name):
+        docker_finalize(ctx, name, gateway_dir(ctx, run))
+        ctx.event(run, "gateway_stopped", container=name)
+
+
+def run_docker_agent(ctx, acfg, prompt_file, out_file, cwd, mode, log, timeout, name, gateway=None):
+    d, errs = docker_settings(ctx, acfg)
+    if errs:
+        log.write(f"[{now()}] configuration docker refusée : {errs}\n")
+        return 126, None
+    if d["network"] == "gateway" and (mode != "write" or not gateway):
+        gateway = None  # revue / débat : jamais de réseau ; une équipe sans jeton émis par dispatch non plus
+        if mode == "write":
+            log.write(f"[{now()}] équipe `gateway` sans réseau ni jeton émis par dispatch : refus\n")
+            return 126, None
+    argv_in = [x.format(prompt_file="/pmx/brief.md", cwd="/work", mode=mode) for x in d["argv"]]
+    rc, out, err, ev, why = docker_exec(ctx, d, name, argv_in, cwd, mode, timeout, pathlib.Path(log.name).parent, log=log, prompt_file=prompt_file,
+                                        gateway=gateway)
+    log.write(out[-20000:] + "\n" + err[-20000:] + f"\n[{now()}] exit {rc} (container {name}, oom={bool(ev and ev['state'].get('OOMKilled'))}{', ' + why if why else ''})\n")
+    if rc != 124:
+        write_atomic(pathlib.Path(out_file), out)
+    return rc, ev
+
+
+def runner_label(kind):
+    return ("docker — isolated container (no network, no HOME, no secrets, read-only root, checkout only)" if kind == "docker"
+            else "host — NOT isolated (3.1 mode): team code runs on the host with the user's rights")
+
+
+def verify_runner(ctx):
+    """→ (« host » | « docker », réglages, erreurs). `orchestration.verify_runner` : où s'exécutent les commandes de test
+    de confiance (verify, integrate). « host » = comportement 3.1 : le code des équipes s'exécute sur l'hôte, NON isolé."""
+    vr = ctx.o.get("verify_runner") or {"adapter": "host"}
+    if vr.get("adapter", "host") == "host":
+        return "host", None, []
+    if vr.get("adapter") != "docker":
+        return "docker", None, [f"verify_runner : adaptateur inconnu {vr.get('adapter')!r} (host | docker)"]
+    raw = vr.get("docker")
+    if not isinstance(raw, dict):
+        return "docker", None, ["verify_runner : bloc `docker` requis (image, limites)"]
+    errs = ["verify_runner.docker : `argv` interdit (seules les commandes de test de confiance s'exécutent)"] if "argv" in raw else []
+    d, more = docker_settings(ctx, {"docker": {**raw, "argv": ["-"]}}, allow_gateway=False)  # argv = chaque commande de confiance ; réseau none seulement
+    return "docker", d, errs + more
 
 
 # ---------------------------------------------------------------- doctor (phase A automatisée, lecture seule)
@@ -378,6 +1075,7 @@ def cmd_doctor(ctx, a):
     chk("codex login", ["codex", "login", "status"])
     chk("claude", ["claude", "--version"])
     chk("claudex (optionnel)", ["sh", "-c", "command -v claudex"])
+    chk("docker (optionnel)", ["docker", "version", "--format", "{{.Server.Version}}"])
     for name, st, info in rows:
         print(f"  {'✔' if st == 'ok' else '–'} {name:<20} {st:<8} {info}")
     remotes = git(ctx.root, "remote").split()
@@ -386,6 +1084,20 @@ def cmd_doctor(ctx, a):
     print(f"  worktrees : {ctx.wt_root} · intégration : {ctx.o['integration_branch']} (protégée : {ctx.is_protected(ctx.o['integration_branch'])})")
     for team, t in ctx.o["teams"].items():
         print(f"  équipe {team} : adaptateur {t.get('adapter')} ({t.get('label', '')})")
+        if t.get("adapter") == "docker":
+            d, errs = docker_settings(ctx, t)
+            img = docker("image", "inspect", "--format", "{{.Id}}", d["image"] or "-") if not errs else None
+            for e in errs + ([f"image {d['image']} absente localement (--pull never)"] if img is not None and img.returncode != 0 else []):
+                print(f"    ✘ {e}")
+            if not errs:
+                print(f"    docker : {d['image']} · cpus {d['cpus']} · mémoire {d['memory']} · pids {d['pids']} · réseau none · racine RO · cap-drop ALL")
+    cprobs = confinement_problems(ctx)
+    print(f"  {'✘' if cprobs else '✔' if confined(ctx) else '–'} confinement natif des CLI : {ctx.o.get('confinement') or 'non'}" + (f" — {'; '.join(cprobs)}" if cprobs else ""))
+    mprobs = bypass_problems(ctx) + mode_problems(ctx)
+    print(f"  {'✘' if mprobs else '✔'} profil : {ctx.o.get('mode') or 'default'}" + (f" — {'; '.join(mprobs)}" if mprobs else ""))
+    kind, d, errs = verify_runner(ctx)
+    print(f"  {'✔' if kind == 'docker' and not errs else '⚠'} exécution des tests (verify, integrate) : {runner_label(kind)}"
+          + (f" — {'; '.join(errs)}" if errs else f" — image {d['image']}" if d else ""))
     for c in trusted_commands(ctx) or ["(aucune : tout plan sera refusé)"]:
         prob = command_problem(ctx, c) if trusted_commands(ctx) else "à déclarer dans verify_commands / allowed_test_commands"
         print(f"  {'✘' if prob else '✔'} commande de test de confiance : {c}{' — ' + prob if prob else ''}")
@@ -485,6 +1197,8 @@ def _record_turn(ctx, st, side, text, source):
 
 def cmd_debate(ctx, a):
     ctx.require_enabled()
+    if a.action == "next":
+        require_confinement(ctx)
     st = ctx.load_run(a.run)
     if a.action == "show":
         print((ctx.run_dir(a.run) / "debate" / "DEBATE.md").read_text(encoding="utf-8") if (ctx.run_dir(a.run) / "debate" / "DEBATE.md").exists() else json.dumps(st["debate"], indent=2, ensure_ascii=False))
@@ -768,15 +1482,58 @@ def changed_paths(wt, base):
     return out, deleted
 
 
+def special_files(wt, limit=20000):
+    """FIFO, sockets, périphériques du worktree : invisibles pour `git status`, jamais produits par une équipe légitime."""
+    found, stack, n = [], [pathlib.Path(wt)], 0
+    while stack and n < limit:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for e in entries:
+            n += 1
+            if e.name == ".git" and e.path.count(os.sep) == str(wt).rstrip(os.sep).count(os.sep) + 1:
+                continue
+            if e.is_dir(follow_symlinks=False):
+                stack.append(pathlib.Path(e.path))
+            elif not e.is_file(follow_symlinks=False) and not e.is_symlink():
+                found.append(os.path.relpath(e.path, wt))
+    return found
+
+
+def gitfile_problem(ctx, wt):
+    """Le pointeur `.git` d'un worktree est écrit par Git, dans un répertoire où l'équipe peut écrire. Redirigé vers un faux
+    dépôt, il ferait lire à Git (lancé par pmx sur l'hôte) une configuration choisie par l'équipe (filtres, pilotes…).
+    Contrôlé AVANT toute commande git sur le worktree : pointeur vers `<dépôt>/.git/worktrees/<nom>` qui pointe en retour."""
+    gf = pathlib.Path(wt) / ".git"
+    try:
+        if gf.is_symlink() or not gf.is_file():
+            return "pointeur .git remplacé (lien ou répertoire)"
+        txt = gf.read_text(encoding="utf-8", errors="replace").strip()
+        if not txt.startswith("gitdir: ") or "\n" in txt:
+            return "pointeur .git modifié"
+        target = pathlib.Path(txt[8:]).resolve()
+        admin = (ctx.root / ".git" / "worktrees").resolve()
+        if target.parent != admin or (target / "gitdir").read_text(encoding="utf-8").strip() != str(gf.resolve()):
+            return f"pointeur .git redirigé ({target})"
+    except OSError as e:
+        return f"pointeur .git illisible ({type(e).__name__})"
+    return None
+
+
 def scope_check(ctx, task, wt, base):
     """→ (violations critiques, chemins modifiés). Hors périmètre, sensible ou suppression = échec critique."""
+    if pathlib.Path(wt).exists() and (why := gitfile_problem(ctx, wt)):
+        return [f".git : {why} — aucune commande git lancée sur ce worktree"], set()
     paths, deleted = changed_paths(wt, base)
     allowed = list(task["files"]) + [f"ai_memory/*__ROLE-*__{task['wi']}.md"]
-    bad = []
+    bad = [f"{p} : fichier spécial (FIFO, socket ou périphérique)" for p in special_files(wt)]
     for p in sorted(paths):
         cat = classify(p, ctx.o["sensitive_paths"])
         if cat:
             bad.append(f"{p} : chemin sensible ({cat})")
+        elif os.path.islink(os.path.join(wt, p)):  # suivi par les tests et outils de l'hôte : jamais accepté d'une équipe
+            bad.append(f"{p} : lien symbolique → {os.readlink(os.path.join(wt, p))} (validation humaine)")
         elif p in deleted:
             bad.append(f"{p} : suppression (validation humaine)")
         elif not match_any(p, allowed):
@@ -786,6 +1543,8 @@ def scope_check(ctx, task, wt, base):
 
 def team_brief(ctx, st, key, attempt, wt, report):
     t = st["tasks"][key]
+    if ctx.o["teams"][t["team"]].get("adapter") == "docker":  # chemins vus depuis le conteneur
+        wt = "/work"
     if ctx.o["teams"][t["team"]].get("adapter") == "drop":
         where = f"Écris ton rapport dans `{report}` (hors worktree ; seul fichier extérieur autorisé)"
     else:  # Codex/claude -p : la sortie est capturée par l'orchestrateur ; écrire hors du worktree est impossible (sandbox)
@@ -845,6 +1604,8 @@ def dispatch_ready(ctx, run):
     st = ctx.load_run(run)
     if not st.get("plan") or st["plan"]["status"] != "approved":
         die("plan non approuvé (gate « go »)", EXIT_HUMAN)
+    if any(wi_status(ctx, t["wi"]) == "OPEN" for t in st["tasks"].values()):
+        require_confinement(ctx)
     waiting, launched = [], []
     with ctx.lock():
         st = ctx.load_run(run)
@@ -860,12 +1621,15 @@ def dispatch_ready(ctx, run):
             if t["depends_on"]:  # dépendance satisfaite = intégrée dans la branche d'intégration locale
                 base = git(ctx.root, "rev-parse", ctx.o["integration_branch"])
                 for d in t["depends_on"]:
-                    if subprocess.run(["git", "-C", str(ctx.root), "merge-base", "--is-ancestor", st["tasks"][d]["commit"], base]).returncode != 0:
+                    if subprocess.run([*GIT_SAFE, "-C", str(ctx.root), "merge-base", "--is-ancestor", st["tasks"][d]["commit"], base], env=git_env()).returncode != 0:
                         die(f"{key} : dépendance {d} non intégrée dans {ctx.o['integration_branch']}")
             n = len(t["attempts"]) + 1
             branch = f"{ctx.o['branch_prefix']}{run.lower()}/{key}" + (f"-a{n}" if n > 1 else "")
             if ctx.is_protected(branch):
                 die(f"branche protégée refusée : {branch}")
+            team = ctx.o["teams"][t["team"]]
+            if team.get("adapter") == "docker" and (errs := docker_settings(ctx, team)[1]):
+                die(f"{key} : configuration docker de {t['team']} refusée — " + " ; ".join(errs), EXIT_USAGE)
             wt = ctx.wt_root / f"{key}-a{n}"
             ctx.wt_root.mkdir(parents=True, exist_ok=True)
             git(ctx.root, "worktree", "add", "-q", "-b", branch, str(wt), base)
@@ -874,16 +1638,24 @@ def dispatch_ready(ctx, run):
             report = tdir / f"report-a{n}.md"
             brief = tdir / f"brief-a{n}.md"
             write_atomic(brief, team_brief(ctx, st, key, n, wt, report))
-            team = ctx.o["teams"][t["team"]]
             att = {"n": n, "branch": branch, "worktree": str(wt), "base": base, "brief": str(brief), "report": str(report),
                    "adapter": team.get("adapter"), "pid": None, "started": now(), "ended": None, "result": None}
+            env_team = None
+            if team.get("adapter") == "docker":
+                att["container"] = container_name(ctx, f"{run}-{key}-a{n}")
+                d = docker_settings(ctx, team)[0]
+                if d["network"] == "gateway":  # réseau interne dédié + jeton ; le jeton ne quitte la mémoire que vers le client docker
+                    att["gateway"], token = gateway_attach_team(ctx, run, key, n, t["team"], d)
+                    env_team = {**os.environ, "PMX_TEAM_GATEWAY_TOKEN": token}
+                    ctx.event(run, "gateway_team_attached", task=key, attempt=n, network=att["gateway"]["network"], subnet=att["gateway"]["subnet"],
+                              routes=att["gateway"]["routes"], token_fp=att["gateway"]["token_fp"])
             if team.get("adapter") == "drop":
                 waiting.append((key, brief, report))
             else:
                 log = open(tdir / f"team-a{n}.log", "a")
                 p = subprocess.Popen([sys.executable, "-I", str(pathlib.Path(__file__).resolve()), "--root", str(ctx.root), "_team",
                                       "--run", run, "--task", key, "--attempt", str(n)],
-                                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env_team)
                 att["pid"] = p.pid
             t["attempts"].append(att)
             wi_set(ctx, t["wi"], status="IN_PROGRESS", session=f"{t['team']} ({att['adapter']}, pid {att['pid'] or 'externe'})",
@@ -911,15 +1683,28 @@ def cmd_dispatch(ctx, a):
 
 def cmd_team(ctx, a):
     """Processus détaché d'une équipe : exécute l'adaptateur et écrit result.json. N'écrit jamais le registre."""
-    st = ctx.load_run(a.run)
+    with ctx.lock():  # dispatch enregistre la tentative APRÈS le lancement : attendre qu'il ait fini (verrou)
+        st = ctx.load_run(a.run)
     t = st["tasks"][a.task]
     att = t["attempts"][int(a.attempt) - 1]
     tdir = ctx.run_dir(a.run) / "tasks" / a.task
     ctx.event(a.run, "team_process_begin", task=a.task, attempt=int(a.attempt))
     started = now()
-    rc = run_agent_sync(ctx, ctx.o["teams"][t["team"]], att["brief"], att["report"], att["worktree"], "write",
-                        tdir / f"team-a{a.attempt}.log", ctx.o["team_timeout_s"])
-    write_atomic(tdir / f"result-a{a.attempt}.json", json.dumps({"exit": rc, "started": started, "ended": now()}) + "\n")
+    gw = att.get("gateway")
+    token = os.environ.pop("PMX_TEAM_GATEWAY_TOKEN", None)
+    try:
+        rc = run_agent_sync(ctx, ctx.o["teams"][t["team"]], att["brief"], att["report"], att["worktree"], "write",
+                            tdir / f"team-a{a.attempt}.log", ctx.o["team_timeout_s"], name=att.get("container"),
+                            gateway=(gw["network"], token, gw["routes"]) if gw and token else None)
+    finally:
+        if gw:  # jeton révoqué et réseau retiré dès la fin du conteneur
+            gateway_detach_team(ctx, a.run, gw)
+    res = {"exit": rc, "started": started, "ended": now()}
+    if att.get("container"):
+        evf = tdir / f"container-{att['container']}.json"
+        state = json.loads(evf.read_text(encoding="utf-8"))["state"] if evf.exists() else {}
+        res.update(container=att["container"], oom=bool(state.get("OOMKilled")))
+    write_atomic(tdir / f"result-a{a.attempt}.json", json.dumps(res) + "\n")
     ctx.event(a.run, "team_process_end", task=a.task, attempt=int(a.attempt), exit=rc)
     return EXIT_OK
 
@@ -948,6 +1733,8 @@ def abort_all(ctx, run, reason):
         if wi_status(ctx, t["wi"]) != "IN_PROGRESS":
             continue
         att = t["attempts"][-1]
+        if att.get("container"):  # le conteneur appartient au démon : tuer le client docker ne l'arrête pas
+            docker_stop(ctx, att["container"])
         if att.get("pid") and pid_alive(att["pid"]):
             try:
                 os.killpg(att["pid"], signal.SIGTERM)
@@ -965,6 +1752,12 @@ def abort_all(ctx, run, reason):
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+    for key in stopped:  # preuve de chaque conteneur arrêté (état, configuration), puis suppression du seul conteneur pmx
+        if (c := st["tasks"][key]["attempts"][-1].get("container")):
+            docker_finalize(ctx, c, ctx.run_dir(run) / "tasks" / key)
+        if (gw := st["tasks"][key]["attempts"][-1].get("gateway")):
+            gateway_detach_team(ctx, run, gw)
+    gateway_reap(ctx, run, st)
     ctx.save_run(st)
     lk.close()
     ctx.event(run, "critical_abort", reason=reason, stopped=stopped)
@@ -1007,8 +1800,13 @@ def cmd_tick(ctx, a):
                 res = json.loads(resf.read_text(encoding="utf-8"))
                 _finish_attempt(ctx, st, key, res)
             elif att["adapter"] != "drop" and not pid_alive(att["pid"]):
+                if att.get("container"):  # client docker disparu (coupure) : le conteneur orphelin est arrêté, preuve gardée
+                    docker_finalize(ctx, att["container"], ctx.run_dir(a.run) / "tasks" / key)
+                if att.get("gateway"):
+                    gateway_detach_team(ctx, a.run, att["gateway"])
                 _finish_attempt(ctx, st, key, {"exit": None, "ended": now(), "interrupted": True})
         ctx.save_run(st)
+        gateway_reap(ctx, a.run, st)
     return rc_out
 
 
@@ -1104,6 +1902,8 @@ def failure_record(ctx, t, att, res, rtext, bad, paths):
         kind, detail = "timeout", ""
     elif bad:
         kind, detail = "scope", "; ".join(bad)
+    elif res.get("oom"):
+        kind, detail = f"exit-{res.get('exit')}", "oom-killed: container memory limit reached"
     elif res.get("exit") not in (0, None):
         log = pathlib.Path(att["report"]).parent / f"team-a{att['n']}.log"
         last = next((l for l in reversed((log.read_text(encoding="utf-8", errors="replace") if log.exists() else "").splitlines())
@@ -1241,13 +2041,24 @@ def command_problem(ctx, cmd):
     return None
 
 
-def run_checks(ctx, wt, commands, timeout):
+def run_checks(ctx, wt, commands, timeout, evidence_dir, label):
+    """Exécute les commandes de confiance sur un checkout jetable : dans un conteneur isolé (`verify_runner` docker) ou,
+    en mode 3.1, sur l'hôte (NON isolé). Un résultat portant `inconclusive` n'est ni PASS ni FAIL : il bloque."""
     bad = [p for p in map(lambda c: command_problem(ctx, c), commands) if p]
     if bad:  # les appelants filtrent avant ; ceinture et bretelles
         raise RuntimeError("; ".join(bad))
+    kind, d, errs = verify_runner(ctx)
+    if errs:
+        raise RuntimeError("; ".join(errs))
     results = []
-    for c in commands:
+    for i, c in enumerate(commands):
         t0 = time.time()
+        if kind == "docker":
+            name = container_name(ctx, f"verify-{label}-{i}-{time.time_ns()}")
+            rc, out, err, ev, why = docker_exec(ctx, d, name, shlex.split(c), wt, "verify", timeout, evidence_dir, labels={"label": label})
+            results.append({"command": c, "exit": rc, "seconds": round(time.time() - t0, 2), "output": tail(out + err), "runner": "docker",
+                             "container": name, "inconclusive": why})
+            continue
         try:
             p = subprocess.run(shlex.split(c), cwd=str(wt), capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
             rc, out = p.returncode, p.stdout + p.stderr
@@ -1255,7 +2066,7 @@ def run_checks(ctx, wt, commands, timeout):
             rc, out = 124, f"TIMEOUT {timeout}s"
         except OSError as e:
             rc, out = 127, f"{type(e).__name__}: {e}"
-        results.append({"command": c, "exit": rc, "seconds": round(time.time() - t0, 2), "output": tail(out)})
+        results.append({"command": c, "exit": rc, "seconds": round(time.time() - t0, 2), "output": tail(out), "runner": "host"})
     return results
 
 
@@ -1303,7 +2114,7 @@ def cmd_verify(ctx, a):
     for key in keys:
         t = st["tasks"][key]
         cmds = [t["test_command"]] + [c for c in ctx.o["verify_commands"] if c != t["test_command"]]
-        bad = [p for p in map(lambda c: command_problem(ctx, c), cmds) if p]
+        bad = [p for p in map(lambda c: command_problem(ctx, c), cmds) if p] + verify_runner(ctx)[2]
         if bad:
             ctx.event(a.run, "verify_refused", task=key, reasons=bad)
             print(f"  ✘ {key} : vérification REFUSÉE, rien n'a été exécuté — {'; '.join(bad)}")
@@ -1314,10 +2125,12 @@ def cmd_verify(ctx, a):
             die(f"checkout de vérification déjà présent (preuve d'une vérification précédente ?) : {vdir}", EXIT_HUMAN)
         before = repo_snapshot(ctx)
         git(ctx.root, "worktree", "add", "-q", "--detach", str(vdir), t["commit"])
-        res = run_checks(ctx, vdir, cmds, ctx.o["verify_timeout_s"])
-        probs = checkout_problems(ctx, vdir, t["commit"], before)
+        res = run_checks(ctx, vdir, cmds, ctx.o["verify_timeout_s"], ctx.run_dir(a.run) / "verify" / key, f"{key}-{t['commit'][:8]}")
+        runner = verify_runner(ctx)[0]
+        probs = [f"vérification non concluante ({r['command']}) : {r['inconclusive']}" for r in res if r.get("inconclusive")]
+        probs += checkout_problems(ctx, vdir, t["commit"], before)
         if not probs:
-            rm = subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", str(vdir)], capture_output=True, text=True)
+            rm = subprocess.run([*GIT_SAFE, "-C", str(ctx.root), "worktree", "remove", str(vdir)], capture_output=True, text=True, env=git_env())
             if rm.returncode != 0 or vdir.exists():
                 probs.append(f"nettoyage du checkout impossible : {rm.stderr.strip() or 'répertoire toujours présent'}")
         evidence = preserve_evidence(ctx, a.run, f"verify-{key}-{t['commit'][:8]}", vdir, probs, res) if probs else None
@@ -1327,12 +2140,12 @@ def cmd_verify(ctx, a):
             "ALTERED — " + " | ".join(probs) + f"\n- Checkout kept as evidence: {vdir}\n- Integrity evidence: {evidence}"
         nxt = {"PASS": "cross review", "FAIL": "developer (new attempt)", "INCONCLUSIVE": "human triage (pmx reopen --by human:<name>) — no automatic retry"}[verdict]
         note = role_note(ctx, "verifier", t["wi"], f"# verifier note — {t['wi']}\n\n- Work item: {t['wi']}\n- Role: verifier (pmx, clean detached checkout of {t['commit'][:10]}, tree {t['tree'][:10]})\n"
-                         f"- Status: {verdict}\n- Commands run (trusted, no shell): {cmds}\n- Checkout integrity: {integ}\n"
+                         f"- Status: {verdict}\n- Commands run (trusted, no shell): {cmds}\n- Runner: {runner_label(runner)}\n- Checkout integrity: {integ}\n"
                          f"- Evidence:\n```\n{ev}\n```\n- Next actions: {nxt}\n")
         with ctx.lock():
             st = ctx.load_run(a.run)
             st["tasks"][key]["verify"] = {"verdict": verdict, "commit": t["commit"], "tree": t["tree"], "ts": now(), "note": str(note), "results": res,
-                                          "integrity": probs, "evidence": str(evidence) if evidence else None}
+                                          "integrity": probs, "evidence": str(evidence) if evidence else None, "runner": runner}
             if verdict == "PASS":
                 wi_set(ctx, t["wi"], status="READY_FOR_REVIEW", links=str(note))
             elif verdict == "INCONCLUSIVE":
@@ -1349,8 +2162,8 @@ def cmd_verify(ctx, a):
                                                          "report": str(note), "log": str(note)}, "ts": now()})
                 worst = worst if worst == EXIT_HUMAN else EXIT_FAIL
             ctx.save_run(st)
-        ctx.event(a.run, "verified", task=key, verdict=verdict, commit=t["commit"], integrity=probs)
-        print(f"  {'✔' if verdict == 'PASS' else '✘'} {key} : verifier {verdict} ({t['commit'][:10]})")
+        ctx.event(a.run, "verified", task=key, verdict=verdict, commit=t["commit"], integrity=probs, runner=runner)
+        print(f"  {'✔' if verdict == 'PASS' else '✘'} {key} : verifier {verdict} ({t['commit'][:10]}) — exécution : {'conteneur isolé' if runner == 'docker' else 'HÔTE, non isolée (mode 3.1)'}")
         for x in probs:
             print(f"    ⚠ {x}")
         if probs:
@@ -1381,6 +2194,7 @@ def cmd_review(ctx, a):
     st = ctx.load_run(a.run)
     if a.action == "submit":
         return _record_review(ctx, a.run, a.task, pathlib.Path(a.file).read_text(encoding="utf-8"), source="drop")
+    require_confinement(ctx)
     rdir = ctx.run_dir(a.run) / "reviews"
     rdir.mkdir(parents=True, exist_ok=True)
     teams = list(ctx.o["teams"])
@@ -1390,7 +2204,7 @@ def cmd_review(ctx, a):
             continue
         reviewer = ctx.o["cross_review"].get(t["team"]) or next((x for x in teams if x != t["team"]), t["team"])
         acfg = ctx.o["teams"][reviewer].get("reviewer") or ctx.o["teams"][reviewer]
-        diff = git(ctx.root, "diff", f"{t['attempts'][-1]['base']}..{t['commit']}")
+        diff = git(ctx.root, "diff", "--no-ext-diff", "--no-textconv", f"{t['attempts'][-1]['base']}..{t['commit']}")
         pf, of = rdir / f"{key}.prompt.md", rdir / f"{key}.answer.md"
         cdir = ctx.wt_root / f"_review-{key}-{t['commit'][:8]}"
         if not cdir.exists():
@@ -1425,7 +2239,7 @@ def _record_review(ctx, run, key, text, source):
         ctx.save_run(st)
     cdir = ctx.wt_root / f"_review-{key}-{t['commit'][:8]}"
     if cdir.exists():  # checkout propre créé par pmx ; non forcé : s'il a été modifié, il reste et c'est signalé
-        rm = subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", str(cdir)], capture_output=True, text=True)
+        rm = subprocess.run([*GIT_SAFE, "-C", str(ctx.root), "worktree", "remove", str(cdir)], capture_output=True, text=True, env=git_env())
         if rm.returncode != 0:
             print(f"  ⚠ checkout de revue modifié, conservé : {cdir}")
     ctx.event(run, "reviewed", task=key, verdict=verdict, by=source)
@@ -1467,7 +2281,7 @@ def cmd_integrate(ctx, a):
     c(pol.get("mode") == "local-only", "politique : mode local-only")
     c(pol.get("target_branch") == target, f"politique : cible = {target}")
     c(not ctx.is_protected(target), f"cible non protégée ({target})")
-    upstream = subprocess.run(["git", "-C", str(ctx.root), "rev-parse", "--abbrev-ref", f"{target}@{{upstream}}"], capture_output=True, text=True)
+    upstream = subprocess.run([*GIT_SAFE, "-C", str(ctx.root), "rev-parse", "--abbrev-ref", f"{target}@{{upstream}}"], capture_output=True, text=True, env=git_env())
     c(upstream.returncode != 0, "cible sans branche amont (aucun push possible par pmx, qui n'en contient aucun)")
     tty = None
     if not a.dry_run:
@@ -1491,6 +2305,12 @@ def cmd_integrate(ctx, a):
     cmds = list(dict.fromkeys(ctx.o["verify_commands"] + [st["tasks"][k]["test_command"] for k in keys]))
     bad = [p for p in map(lambda x: command_problem(ctx, x), cmds) if p]
     c(not bad, "commandes de test de confiance" + (f" — {'; '.join(bad)}" if bad else ""), needs_human=True)
+    runner, _d, rerrs = verify_runner(ctx)
+    c(not rerrs, f"exécuteur des tests : {runner}" + (f" — {'; '.join(rerrs)}" if rerrs else ""), needs_human=True)
+    if pol.get("require_isolated_verification"):
+        c(runner == "docker", "politique : tests sur l'arbre fusionné en conteneur isolé (verify_runner docker)")
+        for k in keys:
+            c((st["tasks"][k].get("verify") or {}).get("runner") == "docker", f"{k} : vérification faite en conteneur isolé")
     print("\n".join(checks))
     if fail or human:
         if tty is not None:
@@ -1498,7 +2318,7 @@ def cmd_integrate(ctx, a):
         ctx.event(a.run, "integration_refused", failed=fail + human)
         print("intégration REFUSÉE — rien n'a été modifié")
         return EXIT_FAIL if fail else EXIT_HUMAN
-    exists = subprocess.run(["git", "-C", str(ctx.root), "rev-parse", "--verify", "-q", f"refs/heads/{target}"], capture_output=True, text=True)
+    exists = subprocess.run([*GIT_SAFE, "-C", str(ctx.root), "rev-parse", "--verify", "-q", f"refs/heads/{target}"], capture_output=True, text=True, env=git_env())
     old = exists.stdout.strip() if exists.returncode == 0 else None
     start = old or st["base"]
     iwt = ctx.wt_root / f"_integration-{int(time.time())}"
@@ -1507,9 +2327,9 @@ def cmd_integrate(ctx, a):
     try:
         for k in keys:
             t = st["tasks"][k]
-            p = subprocess.run(["git", "-C", str(iwt), *GIT_ID, "merge", "--no-ff", "--no-edit", "-m", f"pilot: integrate {t['wi']} ({k})", t["commit"]], capture_output=True, text=True)
+            p = subprocess.run([*GIT_SAFE, "-C", str(iwt), *GIT_ID, "merge", "--no-ff", "--no-edit", "-m", f"pilot: integrate {t['wi']} ({k})", t["commit"]], capture_output=True, text=True, env=git_env())
             if p.returncode != 0:
-                subprocess.run(["git", "-C", str(iwt), "merge", "--abort"], capture_output=True)
+                subprocess.run([*GIT_SAFE, "-C", str(iwt), "merge", "--abort"], capture_output=True, env=git_env())
                 ctx.event(a.run, "integration_conflict", task=k)
                 print(f"✘ conflit à l'intégration de {k} — {target} inchangée ; arbitrage humain\n{tail(p.stdout + p.stderr, 20)}")
                 return EXIT_HUMAN
@@ -1517,11 +2337,12 @@ def cmd_integrate(ctx, a):
         # candidat figé AVANT les tests : un test qui déplace HEAD ne peut pas changer ce qui sera intégré
         new, tree = git(iwt, "rev-parse", "HEAD"), git(iwt, "rev-parse", "HEAD^{tree}")
         before = repo_snapshot(ctx)
-        res = run_checks(ctx, iwt, cmds, ctx.o["verify_timeout_s"])
+        res = run_checks(ctx, iwt, cmds, ctx.o["verify_timeout_s"], ctx.run_dir(a.run) / "integrate", f"integration-{new[:8]}")
         verdict = "PASS" if all(r["exit"] == 0 for r in res) else "FAIL"
         for r in res:
-            print(f"  $ {r['command']} → exit {r['exit']}")
-        probs = checkout_problems(ctx, iwt, new, before)
+            print(f"  $ {r['command']} → exit {r['exit']} ({'conteneur isolé' if r['runner'] == 'docker' else 'HÔTE, non isolé'})")
+        probs = [f"tests non concluants ({r['command']}) : {r['inconclusive']}" for r in res if r.get("inconclusive")]
+        probs += checkout_problems(ctx, iwt, new, before)
         if probs:
             keep = True
             ev = preserve_evidence(ctx, a.run, f"integration-{new[:10]}", iwt, probs, res)
@@ -1551,7 +2372,7 @@ def cmd_integrate(ctx, a):
         if tty is not None:
             os.close(tty)
         if not keep:
-            subprocess.run(["git", "-C", str(ctx.root), "worktree", "remove", "--force", str(iwt)], capture_output=True)
+            subprocess.run([*GIT_SAFE, "-C", str(ctx.root), "worktree", "remove", "--force", str(iwt)], capture_output=True, env=git_env())
     with ctx.lock():
         st = ctx.load_run(a.run)
         st.setdefault("integrations", []).append({"target": target, "commit": new, "merged": merged, "approved_by": a.approved_by, "confirmation": confirmed, "ts": now()})
@@ -1565,7 +2386,7 @@ def cmd_integrate(ctx, a):
         prev = p.read_text(encoding="utf-8") if p.exists() else f"# Decision log — {st['parent_wi']}\n"
         write_atomic(p, prev.rstrip() + f"\n\n## {now()} — local integration\n- Approved by (declared): {a.approved_by}\n"
                      f"- Confirmation: typed on the controlling terminal ({confirmed['tty']}, OS user {confirmed['os_user']}) — a guard against agent-triggered integration, not an authentication\n"
-                     f"- Target: {target} {old[:10] if old else '(new)'} → {new[:10]} (tree {tree[:10]})\n- Merged: {merged}\n- Tests on merged tree: {verdict}; checkout integrity: clean\n"
+                     f"- Target: {target} {old[:10] if old else '(new)'} → {new[:10]} (tree {tree[:10]})\n- Merged: {merged}\n- Tests on merged tree: {verdict}; checkout integrity: clean; runner: {runner_label(runner)}\n"
                      f"- Rollback: `git update-ref refs/heads/{target} {old or '<delete branch by hand>'} {new}`\n")
     ctx.event(a.run, "integrated", target=target, commit=new, previous=old, approved_by=a.approved_by, confirmation=confirmed, merged=merged)
     print(f"✔ intégré dans {target} : {(old or 'nouvelle')[:10]} → {new[:10]} · aucune fusion vers {st['base_branch']} (humaine uniquement)")

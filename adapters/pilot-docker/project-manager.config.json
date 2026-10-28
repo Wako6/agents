@@ -1,0 +1,55 @@
+{
+  "schema": "pm-v3/1",
+  "_comment": "Pilote pmx avec isolation Docker (opt-in, 3.2.0-rc1). Copier dans <repo>/.claude/ d'un dépôt PILOTE. Chaque équipe tourne dans son conteneur : utilisateur non-root, racine en lecture seule, cap-drop ALL, no-new-privileges, réseau none, limites CPU/mémoire/processus, seul son worktree monté. L'image doit exister localement (jamais téléchargée par pmx) et contenir le programme de l'agent.",
+  "work_items": { "backend": "ledger" },
+  "reading_map": ["CLAUDE.md"],
+  "multi_team": { "enabled": true, "lead_in_main_checkout": true },
+  "language": { "user": "fr", "memory": "en" },
+  "orchestration": {
+    "enabled": true,
+    "max_parallel": 2,
+    "max_attempts": 3,
+    "auto_retry": true,
+    "team_timeout_s": 1800,
+    "debate": {
+      "max_rounds": 3,
+      "order": ["claude", "codex"],
+      "agents": { "claude": { "adapter": "drop" }, "codex": { "adapter": "codex-cli" } }
+    },
+    "teams": {
+      "team-a": {
+        "adapter": "docker",
+        "label": "équipe A (conteneur isolé)",
+        "docker": {
+          "image": "<image-locale-de-l-agent>:<tag>",
+          "argv": ["<programme de l'agent>", "{prompt_file}"],
+          "cpus": 2.0, "memory": "1g", "pids": 256, "tmpfs_size": "256m", "network": "none"
+        },
+        "reviewer": { "adapter": "drop" }
+      },
+      "team-b": {
+        "adapter": "docker",
+        "label": "équipe B (conteneur isolé)",
+        "docker": {
+          "image": "<image-locale-de-l-agent>:<tag>",
+          "argv": ["<programme de l'agent>", "{prompt_file}"],
+          "cpus": 2.0, "memory": "1g", "pids": 256, "tmpfs_size": "256m", "network": "none"
+        },
+        "reviewer": { "adapter": "drop" }
+      }
+    },
+    "cross_review": { "team-a": "team-b", "team-b": "team-a" },
+    "worktree_root": "../<repo>.worktrees",
+    "branch_prefix": "pilot/",
+    "integration_branch": "pilot/integration",
+    "protected_branches": ["main", "master", "develop", "production", "release/*", "hotfix/*"],
+    "verify_runner": {
+      "adapter": "docker",
+      "docker": { "image": "<image-locale-avec-l-outillage-de-test>:<tag>", "cpus": 2.0, "memory": "1g", "pids": 256, "tmpfs_size": "256m", "network": "none" }
+    },
+    "verify_commands": ["<commande de test complète du projet>"],
+    "allowed_test_commands": [],
+    "sensitive_paths": [],
+    "integration_policy": ".claude/pmx.integration-policy.json"
+  }
+}

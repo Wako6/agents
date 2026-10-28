@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## 3.2.0-rc1 — isolation Docker des équipes (opt-in) — 2026-10-28
+
+Inactif par défaut : une équipe n'est conteneurisée que si la configuration du projet déclare `"adapter": "docker"` pour elle. Sans ce réglage, le comportement est celui de 3.1.0-rc1.
+
+### Nouveau
+- Adaptateur `docker` dans `scripts/pmx.py` : un conteneur dédié par tentative.
+  - Protections : utilisateur non-root, racine en lecture seule, `cap-drop ALL`, `no-new-privileges`, réseau `none`, limites CPU, mémoire (sans swap) et processus, `/tmp` en tmpfs limité et `noexec`, espaces de noms pid et ipc privés.
+  - Montages : le worktree de la tâche seul, son fichier `.git` en lecture seule, le brief et le programme de l'agent en lecture seule.
+  - Jamais montés : la socket Docker, le HOME de l'hôte, les identifiants. Aucune variable de l'hôte n'est transmise. L'image n'est jamais téléchargée (`--pull never`).
+  - La configuration réelle du conteneur (`docker inspect`) est contrôlée **avant** son démarrage.
+  - Cycle de vie entièrement géré par pmx : arrêt sur dépassement du délai, échec critique ou reprise. Preuve `container-*.json` (configuration, montages, sortie, `OOMKilled`), puis suppression. Seuls les conteneurs créés pour ce dépôt sont touchés (labels).
+  - Configuration explicite par équipe (`docker`, clés fermées) ; refus de toute clé de montage, de privilège, d'argument libre ou de réseau. Validation au `dispatch` et dans `doctor`.
+- `adapters/pilot-docker/` : configuration d'exemple. `docs/PILOT-DOCKER.md` : utilisation, protections, limites, retour arrière.
+- Tests :
+  - `tests/pilot/test_hybrid.py` : 15 tests ; `tests/pilot/test_docker.py` : 26 tests, conteneurs réels, agent factice `docker-agent/agent.sh`. Ils couvrent la séparation entre deux équipes, les limites, les arrêts, la reprise et le cycle complet jusqu'à l'intégration. Ils sont ignorés sans Docker.
+  - `tests/pilot/docker_measure.py` : mesure du parallélisme et des ressources.
+
+- **Vérification isolée** (`orchestration.verify_runner`, adaptateur `docker`) : les commandes de test de confiance de `verify` et d'`integrate` s'exécutent chacune dans un conteneur, avec les protections des équipes, sur le checkout jetable seul.
+  - C1 reste actif.
+  - Est `INCONCLUSIVE`, donc bloquant, une vérification impossible (image absente, démon indisponible), interrompue (signal), en OOM ou hors délai. Jamais de repli sur l'hôte.
+  - La politique d'intégration peut l'exiger : `require_isolated_verification`.
+  - Le mode hôte (3.1, par défaut) reste disponible, explicitement signalé comme non isolé.
+
+- **Passerelle réseau des équipes** (`scripts/pmx_gateway.py`, `orchestration.gateway`, opt-in ; équipes docker `network: gateway`). Validée avec des services amont simulés uniquement.
+  - Relais à routes fixes ; jeton par tentative lié au réseau interne de l'équipe ; clé amont injectée, jamais visible de l'équipe.
+  - Refus des réseaux privés, du loopback, des métadonnées cloud, de `*.docker.internal` et de l'API Docker (après résolution), ainsi que des redirections, de CONNECT et des URI absolues.
+  - Quotas par équipe, limites de taille et de délai, journal sans secret. Aucun port publié.
+  - Le réseau `none` reste le défaut, et la vérification isolée ne peut pas recevoir de réseau.
+- Correction : le processus d'équipe attend que `dispatch` ait enregistré sa tentative (verrou). Avant, une lecture trop précoce de `run.json` pouvait faire échouer la tentative ; c'était latent en 3.1, et exposé par la création des réseaux.
+
+- **Profil hybride `host-agents+docker-verification`** (`orchestration.mode`, exemple `adapters/pilot-hybrid/`, `docs/PILOT-HYBRID.md`). Claude Code et Codex restent sur l'hôte, avec leurs authentifications existantes (aucune clé API) et leurs permissions natives ; la vérification et les tests d'intégration se font obligatoirement en conteneur. `pmx` refuse de fonctionner si `verify_runner` n'est pas docker, si la politique n'exige pas l'isolation, si un agent est conteneurisé ou si les réglages `claude-cli` n'interdisent pas `docker`. Mode recommandé, **limité aux projets non sensibles** : le confinement natif enferme les outils des agents, pas le processus des CLI. Le mode tout-Docker avec passerelle reste expérimental et désactivé par défaut ; le mode `default` (vérifications sur l'hôte, non isolées) reste disponible.
+- **Confinement natif des CLI** (`orchestration.confinement = "native"`, obligatoire en profil hybride). `pmx` impose les sandbox officiels des deux éditeurs (bubblewrap) :
+  - Claude : réglages générés par appel (sandbox, `failIfUnavailable`, aucune commande hors sandbox, lectures limitées au chemin absolu du worktree, réseau vide, `blockReadsOutsideWorkingDirectories`) ;
+  - Codex : profil de permissions bêta `pmx-ws` / `pmx-ro` passé par `-c` (racine refusée, chemins minimaux, worktree, ni `/tmp` ni réseau) ;
+  - `WSL_INTEROP` retiré ;
+  - préflight avant tout agent : `bwrap`, `socat`, Claude ≥ 2.1.257, essai sans modèle du sandbox Codex ; arrêt sans repli.
+
+  Validé en réel : 14 accès sensibles bloqués pour chaque CLI (hors worktree, `/mnt/c`, interop, `cmd.exe`, Docker, réseau, écritures), outil Read de Claude refusé, contournement refusé.
+- Adaptateur `codex-cli` : le sandbox natif est **durci explicitement** en ligne de commande, sans lire ni modifier `~/.codex` : `sandbox_workspace_write.network_access=false`, `exclude_slash_tmp=true`, `exclude_tmpdir_env_var=true`. Mesuré en réel : avec la configuration de l'utilisateur, Codex en `workspace-write` écrivait dans `/tmp`, avait le réseau et interrogeait le démon Docker ; après durcissement, ces trois accès sont refusés.
+- Contrôle du pointeur `.git` des worktrees **avant toute commande Git** : redirigé vers un faux dépôt ⇒ arrêt critique.
+- Tout drapeau ou réglage de contournement des permissions natives est refusé, dans tous les modes : `--dangerously-*`, `bypassPermissions`, `danger-full-access`, `--yolo`.
+
+### Durci (tous adaptateurs)
+- Git exécuté par pmx : aucun hook (`core.hooksPath=/dev/null`), aucun fsmonitor, aucun transport (`protocol.allow=never`), configuration globale et système ignorées (pas de filtre, diff externe ou `textconv` de l'utilisateur) ; diff du reviewer sans diff externe ni `textconv`.
+- Chemins sensibles : `.gitattributes`, `.gitmodules`, `.git` imbriqué.
+- Contrôle de périmètre : un lien symbolique, ou un fichier spécial (FIFO, socket, périphérique, invisible pour `git status`), dans le worktree d'une équipe déclenche l'échec critique.
+- Cause d'échec `oom-killed` reconnue (limite mémoire d'un conteneur).
+
+### Limites
+Voir `docs/PILOT-DOCKER.md` :
+- aucun agent réel dans un conteneur, et un réseau `none` empêche l'accès aux API ;
+- même UID que l'hôte, et l'utilisateur hôte appartient au groupe `docker` ;
+- noyau partagé, sans AppArmor ni SELinux sous WSL2 ;
+- disque du worktree non plafonné ;
+- vérification isolée seulement si `verify_runner` docker est configuré (le mode hôte, par défaut, n'est pas isolé) ;
+- opérations Git de pmx toujours exécutées sur l'hôte (durcies).
+
 ## 3.1.0-rc1 — orchestration multi-agents pilote (opt-in) — 2026-10-26
 
 Inactif par défaut : sans `orchestration.enabled: true` (backend `ledger`) dans la configuration d'un projet, le comportement est celui de 3.0.0-rc1.

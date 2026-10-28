@@ -51,6 +51,7 @@ Chaque échec reçoit une signature normalisée (type, code de sortie, fichiers 
 
 ## Limites connues
 
+- **Isolation système** : depuis 3.2.0-rc1, une équipe peut tourner dans un conteneur dédié (adaptateur `docker`, opt-in, validé avec des agents factices) — voir `docs/PILOT-DOCKER.md`. Les limites ci-dessous restent vraies pour les autres adaptateurs.
 - **Claudex n'est pas piloté** : son UI exige un TTY ; `pmx` rejoue son protocole (verbatim, marqueurs, lecture seule). Les fonctions propres à Claudex (`/implement`, mémoire `.claudex/`, interventions en cours de tour) ne sont pas utilisées.
 - **Équipe Claude `drop` non sandboxée** au niveau OS : consigne + contrôle de périmètre a posteriori (pendant `wait`, puis à la collecte) + arrêt. Préférer **`claude-cli`** (validé en réel avec `tests/pilot/live_claude_cli.py` : scénarios permissions, brief, fichiers, codes de sortie, parallélisme avec Codex, arrêt sur dépassement) : refus par outil via `--settings` (secrets, `.claude/`, push, réseau, écriture hors worktree, commit), en plus du contrôle de périmètre.
 - **`claude-cli` n'est pas un sandbox OS** non plus : les refus viennent des règles de permission de Claude Code ; une commande `Bash` autorisée (ex. `node --test`) peut écrire des effets de bord hors périmètre — ils sont détectés et arrêtés par `pmx`, pas empêchés.
