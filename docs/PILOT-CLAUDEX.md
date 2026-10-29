@@ -9,7 +9,7 @@ Statut : **pilote opt-in** (release candidate). Inactif tant qu'un projet ne dé
 | `skills/project-manager/scripts/pmx.py` | **nouveau** — orchestrateur (Python stdlib) |
 | `skills/project-manager/references/orchestration-pilot.md` | **nouveau** — protocole du manager |
 | `adapters/pilot-claudex/` | **nouveau** — configuration, politique d'intégration, permissions pilote |
-| `tests/pilot/` | **nouveau** — `test_pmx.py` (29 tests, agents factices, sans usage), `fake_agent.py`, `fixtures/` (rapports réels de Codex rejoués), `live_claude_cli.py` (validation réelle opt-in) |
+| `tests/pilot/` | **nouveau** — `test_pmx.py` (31 tests, agents factices, sans usage), `fake_agent.py`, `fixtures/` (rapports réels de Codex rejoués), `live_claude_cli.py` (validation réelle opt-in) |
 | `skills/project-manager/SKILL.md` | +1 ligne de chargement, +1 phrase de routage (opt-in) |
 | `references/extension-points.md`, `project-config.md`, `work-items.md` | mentions du pilote (I1–I4, I6, I7 ; clé `orchestration` ; champs ledger) |
 | `scripts/pm_config.py` | clé `orchestration` reconnue et validée (backend ledger exigé) |

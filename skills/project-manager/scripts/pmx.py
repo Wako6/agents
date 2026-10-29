@@ -528,9 +528,28 @@ def require_confinement(ctx):
         die("confinement natif indisponible — aucun agent lancé : " + " ; ".join(probs), EXIT_USAGE)
 
 
+# Environnement des CLI d'agents (claude -p, codex exec) : LISTE D'AUTORISATION. Ce que reçoit la CLI est visible des
+# commandes de l'agent (sandbox compris) : rien de la session hôte (sockets SSH/DBus, interop Windows, variables de la
+# session Claude Code qui lance pmx, jetons…) n'est transmis. Authentification existante : fichiers sous HOME
+# (ou CLAUDE_CONFIG_DIR / CODEX_HOME) ; une authentification par variable d'environnement n'est pas transmise.
+AGENT_ENV_ALLOW = {"HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG", "LANGUAGE", "TERM", "TZ",
+                   "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+                   "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE",
+                   "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "PYTHONDONTWRITEBYTECODE"}
+AGENT_ENV_DENY = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|CREDENTIAL|PRIVATE|AWS|AZURE|GITHUB|GITLAB|SSH_AUTH|OAUTH|COOKIE|SESSION", re.I)
+
+
 def agent_env():
-    """Environnement des agents : sans le canal d'interop Windows (WSL_INTEROP)."""
-    return {k: v for k, v in os.environ.items() if k not in ("WSL_INTEROP",)}
+    """Environnement minimal des agents : liste d'autorisation, filtre des noms sensibles par-dessus, proxy avec identifiants
+    écarté. Les valeurs ne sont jamais journalisées."""
+    env = {}
+    for k, v in os.environ.items():
+        if not (k in AGENT_ENV_ALLOW or k.startswith("LC_")) or AGENT_ENV_DENY.search(k):
+            continue
+        if "proxy" in k.lower() and k.lower() != "no_proxy" and "@" in urllib.parse.urlsplit(v if "://" in v else "//" + v).netloc:
+            continue  # proxy avec identifiants : jamais transmis à un agent
+        env[k] = v
+    return env
 
 
 def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):

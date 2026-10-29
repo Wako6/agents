@@ -27,7 +27,15 @@ Les deux CLI gardent vos sessions (le processus de la CLI n'est pas enfermé). E
   - `pmx-ro` pour le débat et la revue : `extends=":read-only"`, avec en plus `":workspace_roots"="read"`.
 
   Le répertoire d'installation de Codex est le seul chemin du HOME rendu lisible : Codex s'y ré-exécute dans le sandbox. Il ne contient aucun identifiant ; `pmx` refuse un répertoire contenant `auth.json`, ainsi que `~` et `~/.codex`.
-- **Environnement** : `WSL_INTEROP` est retiré pour tous les agents.
+- **Environnement des agents : liste d'autorisation** (tous les modes ; `agent_env()`). Ce que reçoit une CLI est visible des commandes de l'agent, sandbox compris. Les CLI ne reçoivent donc que :
+  - `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TMPDIR`, `LANG`, `LANGUAGE`, `LC_*`, `TERM`, `TZ`, `XDG_*_HOME` ;
+  - `CLAUDE_CONFIG_DIR` et `CODEX_HOME`, emplacements de l'authentification existante ;
+  - les certificats TLS (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, `CODEX_CA_CERTIFICATE`) ;
+  - les proxys `*_PROXY`, **écartés s'ils contiennent des identifiants**.
+
+  Tout nom contenant `TOKEN`, `SECRET`, `PASSW`, `API_KEY`, `CREDENTIAL`, `PRIVATE`, `AWS`, `AZURE`, `GITHUB`, `GITLAB`, `SSH_AUTH`, `OAUTH`, `COOKIE` ou `SESSION` est refusé, même s'il figure dans la liste. Ne sont jamais transmis notamment : la socket de l'agent SSH, le bus DBus, l'interop Windows (`WSL_INTEROP`), les variables de la session Claude Code qui lance `pmx` (`CLAUDE_CODE_*`, `ANTHROPIC_BASE_URL`…). **Conséquence** : une authentification fournie par variable d'environnement (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`…) n'est pas utilisable par les agents ; ce profil s'appuie sur la connexion existante, stockée sous `HOME`.
+
+  Mesuré en réel : avec ces seules variables, les deux CLI fonctionnent avec leurs abonnements, et aucune variable de la session hôte n'atteint leurs outils. **Limite** : Claude Code crée lui-même, pour ses propres outils, une variable `CLAUDE_CODE_MESSAGING_TOKEN`. Ce jeton est propre à la session enfant (empreinte différente de celle de la session hôte, mesurée) ; `pmx` ne peut pas l'empêcher. Les variables qu'exporte la configuration de shell de l'utilisateur peuvent aussi être rechargées par l'outil Bash de Claude. Sur le poste de validation, aucune variable sensible ne l'était (`SSH_AUTH_SOCK` absent, mesuré avec zsh et bash).
 - **Préflight**, une fois par processus, avant le premier agent du débat, du lancement ou de la revue :
   - `bwrap` et `socat` présents ;
   - Claude ≥ 2.1.257 ;

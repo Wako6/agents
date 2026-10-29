@@ -2,7 +2,7 @@
 """Agent factice pour les tests de pmx (adaptateur `cmd`) — n'appelle aucune CLI réelle, aucun réseau.
 
   fake_agent.py debate <prompt> <out> <script>        script = marqueurs par tour, ex. "continue,consensus,consensus"
-  fake_agent.py team   <prompt> <out> <cwd> <behavior> behavior = ok | slow | outside | sensitive | gitptr | fail | crash | blocked | copy=<fichier>
+  fake_agent.py team   <prompt> <out> <cwd> <behavior> behavior = ok | slow | outside | sensitive | gitptr | envdump | fail | crash | blocked | copy=<fichier>
   fake_agent.py review <prompt> <out> <verdict>
 """
 import os, pathlib, re, sys, time
@@ -54,6 +54,11 @@ elif kind == "team":
         (cwd / "README.md").write_text("hors périmètre\n", encoding="utf-8")
     if behavior == "sensitive":
         (cwd / ".env").write_text("X=1\n", encoding="utf-8")
+    if behavior == "envdump":  # noms seulement + présence d'une valeur factice (jamais les valeurs)
+        names = sorted(os.environ)
+        leak = any("PMXFAKE" in v for v in os.environ.values())
+        out_f.write_text(f"Status: DONE\nENVNAMES: {' '.join(names)}\nFAKE_VALUE_SEEN: {leak}\n", encoding="utf-8")
+        sys.exit(0)
     if behavior == "gitptr":  # redirige le pointeur .git du worktree vers un faux dépôt (doit être détecté avant tout git)
         (cwd / ".git").write_text(f"gitdir: {cwd}/evil-gitdir\n", encoding="utf-8")
     status = "BLOCKED" if behavior == "blocked" else "DONE"
