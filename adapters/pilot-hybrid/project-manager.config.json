@@ -1,0 +1,90 @@
+{
+  "schema": "pm-v3/1",
+  "_comment": "Mode hybride host-agents+docker-verification (3.2.0-rc1). Claude Code et Codex CLI tournent sur l'hôte avec LEURS authentifications existantes, CONFINÉS par leurs sandbox natifs (confinement=native : bubblewrap ; lectures et écritures limitées au worktree, ni réseau, ni Docker, ni /mnt/c, ni interop Windows pour leurs outils), chacun dans son worktree. Toute vérification (pmx verify) et les tests de l'arbre fusionné (pmx integrate) s'exécutent dans un conteneur sans réseau, sans HOME, sans identifiant. Copier dans <repo>/.claude/ d'un dépôt PILOTE avec settings.hybrid.json et pmx.integration-policy.json ; adapter verify_commands, l'image de vérification (locale, épinglée) et worktree_root.",
+  "work_items": {
+    "backend": "ledger"
+  },
+  "reading_map": [
+    "CLAUDE.md"
+  ],
+  "multi_team": {
+    "enabled": true,
+    "lead_in_main_checkout": true
+  },
+  "language": {
+    "user": "fr",
+    "memory": "en"
+  },
+  "orchestration": {
+    "enabled": true,
+    "mode": "host-agents+docker-verification",
+    "confinement": "native",
+    "max_parallel": 2,
+    "max_attempts": 3,
+    "auto_retry": true,
+    "team_timeout_s": 1800,
+    "debate": {
+      "max_rounds": 3,
+      "order": [
+        "claude",
+        "codex"
+      ],
+      "agents": {
+        "claude": {
+          "adapter": "claude-cli",
+          "settings": ".claude/settings.hybrid.json"
+        },
+        "codex": {
+          "adapter": "codex-cli"
+        }
+      }
+    },
+    "teams": {
+      "team-claude": {
+        "adapter": "claude-cli",
+        "label": "Claude Code (hôte, claude -p, permissions settings.hybrid.json)",
+        "settings": ".claude/settings.hybrid.json",
+        "reviewer": {
+          "adapter": "claude-cli",
+          "settings": ".claude/settings.hybrid.json"
+        }
+      },
+      "team-codex": {
+        "adapter": "codex-cli",
+        "label": "Codex CLI (hôte, sandbox workspace-write)"
+      }
+    },
+    "cross_review": {
+      "team-claude": "team-codex",
+      "team-codex": "team-claude"
+    },
+    "worktree_root": "../<repo>.worktrees",
+    "branch_prefix": "pilot/",
+    "integration_branch": "pilot/integration",
+    "protected_branches": [
+      "main",
+      "master",
+      "develop",
+      "production",
+      "release/*",
+      "hotfix/*"
+    ],
+    "verify_runner": {
+      "adapter": "docker",
+      "docker": {
+        "image": "python@sha256:8bcfa47b04b853a17aaf909362b847b2112fd6ec4105ea553ef9a43bafbb5916",
+        "cpus": 1.0,
+        "memory": "512m",
+        "pids": 128,
+        "tmpfs_size": "64m",
+        "network": "none"
+      }
+    },
+    "verify_commands": [
+      "python3 -B -m unittest discover -s test -v"
+    ],
+    "allowed_test_commands": [],
+    "sensitive_paths": [],
+    "integration_policy": ".claude/pmx.integration-policy.json"
+  }
+}

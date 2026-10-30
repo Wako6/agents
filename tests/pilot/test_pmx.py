@@ -411,6 +411,52 @@ class Pilot(unittest.TestCase):
         self.assertTrue(same(rec("interrupted", ""), rec("interrupted", ""))[0])
 
 
+    # ------------------------------------------------------------------ revue PR #2 : environnement minimal des agents
+
+    SENSITIVE_FAKE = {"GITHUB_TOKEN": "PMXFAKE-gh", "GITLAB_TOKEN": "PMXFAKE-gl", "GH_TOKEN": "PMXFAKE-gh2", "AWS_SECRET_ACCESS_KEY": "PMXFAKE-aws",
+                      "AWS_PROFILE": "PMXFAKE-awsp", "AZURE_CLIENT_SECRET": "PMXFAKE-az", "OPENAI_API_KEY": "PMXFAKE-oai", "ANTHROPIC_API_KEY": "PMXFAKE-ant",
+                      "CLAUDE_CODE_OAUTH_TOKEN": "PMXFAKE-oauth", "CLAUDE_CODE_MESSAGING_TOKEN": "PMXFAKE-msg", "DB_PASSWORD": "PMXFAKE-db",
+                      "MY_SERVICE_SECRET": "PMXFAKE-svc", "SSH_AUTH_SOCK": "/tmp/PMXFAKE-agent.sock", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/PMXFAKE-bus",
+                      "WSL_INTEROP": "/run/WSL/PMXFAKE_interop", "ANTHROPIC_BASE_URL": "http://PMXFAKE.invalid", "CLAUDECODE": "1",
+                      "HTTPS_PROXY": "http://user:PMXFAKE-pw" + chr(64) + "proxy.invalid:3128", "NO_PROXY": "localhost", "LC_ALL": "C.UTF-8"}
+
+    def test_30_agent_env_is_an_allowlist(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pmx", PMX)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        old = dict(os.environ)
+        try:
+            os.environ.update(self.SENSITIVE_FAKE)
+            env = m.agent_env()
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        for k in self.SENSITIVE_FAKE:
+            if k not in ("NO_PROXY", "LC_ALL"):
+                self.assertNotIn(k, env, k)
+        self.assertEqual((env.get("NO_PROXY"), env.get("LC_ALL")), ("localhost", "C.UTF-8"))
+        self.assertIn("PATH", env)
+        self.assertIn("HOME", env)
+        self.assertFalse(any("PMXFAKE" in v for v in env.values()))
+        self.assertTrue(set(env) <= m.AGENT_ENV_ALLOW | {k for k in env if k.startswith("LC_")})
+
+    def test_31_agents_never_receive_host_sensitive_variables(self):
+        self.env.update(self.SENSITIVE_FAKE)
+        self.config({"team-a": team("envdump"), "team-b": team("envdump")})
+        run, wis = self.to_approved([self.task("a", "team-a", ["src/a.js"]), self.task("b", "team-b", ["src/b.js"])])
+        self.pmx("dispatch", "--run", run, code=0)
+        self.pmx("wait", "--run", run, "--interval", "0.3", code=0)
+        for k in ("a", "b"):
+            rep = (self.root / "ai_memory" / "runs" / run / "tasks" / k / "report-a1.md").read_text()
+            names = set(re.search(r"ENVNAMES: (.*)", rep).group(1).split())
+            self.assertIn("FAKE_VALUE_SEEN: False", rep)
+            self.assertEqual(names & set(self.SENSITIVE_FAKE) - {"NO_PROXY", "LC_ALL"}, set())
+            self.assertIn("HOME", names)
+        blob = "\n".join(p.read_text(errors="replace") for p in list(self.root.rglob("*")) + list((self.tmp / "wt").rglob("*"))
+                         if p.is_file() and "/.git/" not in str(p))
+        self.assertNotIn("PMXFAKE", blob)  # aucune valeur sensible dans les journaux, rapports ou état du run
+
     # ------------------------------------------------------------------ revue PR #1 : C1 intégrité, C2 commandes, C3 confirmation
 
     def ready_for(self, stage, **extra):

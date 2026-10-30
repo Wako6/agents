@@ -1,0 +1,15 @@
+{
+  "_comment": "EXEMPLE (non chargé) du bloc orchestration.gateway — passerelle réseau des équipes Docker (opt-in, 3.2.0-rc1). Validée UNIQUEMENT avec des services amont simulés : aucune API réelle, aucune clé réelle. Par défaut, les équipes restent en réseau `none`. Pour l'activer : copier `gateway` dans orchestration et ajouter à une équipe docker `\"network\": \"gateway\", \"gateway_routes\": [\"anthropic\"]`. keys_file : fichier des clés AMONT dédiées au pilote, créé par l'humain (jamais ~/.claude ni ~/.codex) ; il n'est monté que dans la passerelle.",
+  "gateway": {
+    "image": "python@sha256:8bcfa47b04b853a17aaf909362b847b2112fd6ec4105ea553ef9a43bafbb5916",
+    "upstream_network": "<réseau Docker existant où se trouvent les amonts>",
+    "keys_file": "<chemin du fichier JSON {\"anthropic\": \"…\", \"openai\": \"…\"} fourni par l'humain>",
+    "token_ttl_s": 2100,
+    "routes": {
+      "anthropic": { "upstream": "https://api.anthropic.com", "auth_header": "x-api-key" },
+      "openai": { "upstream": "https://api.openai.com", "auth_header": "authorization" }
+    },
+    "limits": { "max_request_bytes": 1048576, "max_response_bytes": 16777216, "upstream_timeout_s": 120, "client_timeout_s": 30, "max_concurrent_per_team": 4 },
+    "quota": { "max_requests": 200, "max_bytes": 67108864, "max_tokens": 2000000 }
+  }
+}

@@ -269,6 +269,14 @@ check "~/.claude réel : chemins du kit (skills, agents, rules, CLAUDE.md, setti
 
 echo "# 11. Pilote pmx (orchestration multi-agents, agents factices)"
 if python3 -I -B "$KIT/tests/pilot/test_pmx.py" >"$SANDBOX/pmx-tests.log" 2>&1; then ok "pilote pmx : $(grep -oE 'Ran [0-9]+ tests' "$SANDBOX/pmx-tests.log")"; else ko "pilote pmx (voir $SANDBOX/pmx-tests.log)"; fi
+DIMG="${PMX_DOCKER_IMAGE:-alpine:3.22}"
+if docker image inspect "$DIMG" >/dev/null 2>&1; then
+  if python3 -I -B "$KIT/tests/pilot/test_docker.py" >"$SANDBOX/pmx-docker-tests.log" 2>&1; then ok "pilote pmx, adaptateur docker (conteneurs réels, agent factice) : $(grep -oE 'Ran [0-9]+ tests' "$SANDBOX/pmx-docker-tests.log")"; else ko "pilote pmx docker (voir $SANDBOX/pmx-docker-tests.log)"; fi
+else skip "pilote pmx, adaptateur docker" "Docker ou image $DIMG indisponible"; fi
+if python3 -I -B "$KIT/tests/pilot/test_gateway.py" >"$SANDBOX/pmx-gateway-tests.log" 2>&1; then ok "pilote pmx, passerelle réseau (API simulées) : $(grep -oE 'Ran [0-9]+ tests.*|OK.*' "$SANDBOX/pmx-gateway-tests.log" | tr '\n' ' ')"; else ko "pilote pmx passerelle (voir $SANDBOX/pmx-gateway-tests.log)"; fi
+if python3 -I -B "$KIT/tests/pilot/test_hybrid.py" >"$SANDBOX/pmx-hybrid-tests.log" 2>&1; then ok "pilote pmx, profil host-agents+docker-verification : $(grep -oE 'Ran [0-9]+ tests.*|OK.*' "$SANDBOX/pmx-hybrid-tests.log" | tr '\n' ' ')"; else ko "pilote pmx profil hybride (voir $SANDBOX/pmx-hybrid-tests.log)"; fi
+check "pilote : adaptateur pilot-hybrid valide (pm_config)" "d=\$(mktemp -d); git -C \$d init -q; mkdir -p \$d/.claude; cp '$KIT/adapters/pilot-hybrid/project-manager.config.json' \$d/.claude/; $CFG validate --root \$d"
+check "pilote : adaptateur pilot-docker valide (pm_config)" "d=\$(mktemp -d); git -C \$d init -q; mkdir -p \$d/.claude; cp '$KIT/adapters/pilot-docker/project-manager.config.json' \$d/.claude/; $CFG validate --root \$d"
 check "pilote : adaptateur pilot-claudex valide (pm_config)" "d=\$(mktemp -d); git -C \$d init -q; mkdir -p \$d/.claude; cp '$KIT/adapters/pilot-claudex/project-manager.config.json' \$d/.claude/; $CFG validate --root \$d"
 echo
 echo "Résultat : $PASS réussis, $FAIL échoués, $SKIP ignorés  (sandbox: $SANDBOX)"

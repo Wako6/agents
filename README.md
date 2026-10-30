@@ -1,6 +1,6 @@
 # Project Manager V3 — Unified (Claude Code)
 
-Version **3.1.0-rc1** (candidate). Kit d'orchestration multi-agents pour [Claude Code](https://code.claude.com) : un seul skill `project-manager` qui pilote une équipe d'agents spécialisés, tient l'état du projet dans des fichiers du dépôt et soumet chaque opération sensible à votre accord.
+Version **3.2.0-rc1** (candidate). Kit d'orchestration multi-agents pour [Claude Code](https://code.claude.com) : un seul skill `project-manager` qui pilote une équipe d'agents spécialisés, tient l'état du projet dans des fichiers du dépôt et soumet chaque opération sensible à votre accord.
 
 Cette branche (`claude`) a la forme exacte d'un dossier `~/.claude/` : elle peut être clonée directement à cet emplacement pour une **première installation**, ou installée de façon non destructive dans une configuration existante.
 
@@ -25,6 +25,8 @@ Vous parlez en français ou en anglais ; le PM choisit le flux, les rôles et le
 - **Vérification indépendante** (`verifier`) et revues spécialisées en lecture seule.
 - **Garde-fous** : un accord explicite par opération sortante (commit, push, MR/PR, issue), aucun merge par l'IA, aucun accès aux secrets, garde-fous des projets jamais modifiés, sous-agents sans accès aux skills.
 - **Orchestration multi-agents (pilote, opt-in)** pour les projets à registre local : débat Claude–Codex borné à 3 tours, décision humaine si désaccord, plan avec détection des collisions, deux équipes parallèles en worktrees isolés, vérification indépendante, revue croisée, intégration **locale** sur accord explicite, arrêt des relances dès qu'une cause d'échec se répète (`scripts/pmx.py`, `docs/PILOT-CLAUDEX.md`). Inactif tant qu'un projet n'active pas `orchestration.enabled`.
+- **Profil hybride `host-agents+docker-verification` (pilote, opt-in ; mode recommandé en 3.2.0-rc1, limité aux projets non sensibles)** : Claude Code et Codex tournent sur l'hôte avec leurs authentifications existantes. Leurs **outils** sont confinés au worktree par les sandbox natifs des CLI (`confinement: native`, réglages imposés par `pmx`, arrêt sans repli si le sandbox est indisponible). Vérification et tests d'intégration se font obligatoirement en conteneur isolé (`docs/PILOT-HYBRID.md`). **Ce n'est pas une isolation complète** : le processus de chaque CLI garde les droits de l'utilisateur et ses sessions.
+- **Isolation Docker des équipes (pilote, opt-in, expérimental)** : adaptateur `docker`, un conteneur par équipe. Non-root, racine en lecture seule, sans capacité Linux, sans réseau, avec limites CPU, mémoire et processus ; seul son worktree est monté. Les commandes de test de `verify` et `integrate` peuvent aussi tourner en conteneur (`verify_runner`) ; sans cela, elles s'exécutent sur l'hôte, sans isolation. Validé avec des agents factices uniquement (`docs/PILOT-DOCKER.md`).
 - **Installateur non destructif** avec manifeste, sauvegardes, conflits, `--dry-run`, `--merge`, `--force`, verrou d'interruption, et **rollback**.
 
 ## 3. Architecture
@@ -44,7 +46,7 @@ Vous parlez en français ou en anglais ; le PM choisit le flux, les rôles et le
 ├── agents/                         12 agents (découverts par Claude Code)
 ├── rules/00-kit-workflow.md        règle globale (chargée dans toutes les sessions)
 ├── optional-agents/                4 agents optionnels (Flutter, SPIP) — non chargés par défaut
-├── adapters/                       generic/ (registre local) · gitlab-multi-team/ (exemple GitLab) · pilot-claudex/ (orchestration opt-in)
+├── adapters/                       generic/ (registre local) · gitlab-multi-team/ (exemple GitLab) · pilot-claudex/ (orchestration opt-in) · pilot-docker/ (équipes en conteneurs, expérimental) · pilot-hybrid/ (agents sur l'hôte, vérification en conteneur)
 ├── templates/                      project-rules/, settings.kit.json, CLAUDE.md.template, ai_rules-example/, mcp…
 ├── install.sh · rollback.sh        installation non destructive et retour arrière
 ├── tests/run.sh                    suite de tests en bac à sable (+ tests/pilot/ : orchestrateur, agents factices ; validation réelle opt-in)

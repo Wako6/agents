@@ -2,7 +2,7 @@
 """Agent factice pour les tests de pmx (adaptateur `cmd`) — n'appelle aucune CLI réelle, aucun réseau.
 
   fake_agent.py debate <prompt> <out> <script>        script = marqueurs par tour, ex. "continue,consensus,consensus"
-  fake_agent.py team   <prompt> <out> <cwd> <behavior> behavior = ok | slow | outside | sensitive | fail | crash | blocked
+  fake_agent.py team   <prompt> <out> <cwd> <behavior> behavior = ok | slow | outside | sensitive | gitptr | envdump | fail | crash | blocked | copy=<fichier>
   fake_agent.py review <prompt> <out> <verdict>
 """
 import os, pathlib, re, sys, time
@@ -45,14 +45,22 @@ elif kind == "team":
         fx = pathlib.Path(__file__).parent / "fixtures" / f"demo-codex-report-a{min(attempt, 3)}.md"
         out_f.write_text(fx.read_text(encoding="utf-8"), encoding="utf-8")
         sys.exit(0)
+    payload = pathlib.Path(behavior[5:]).read_text(encoding="utf-8") if behavior.startswith("copy=") else None  # script de test piégé (fictif)
     for f in files:
         p = cwd / f
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"// produit par l'équipe factice ({behavior})\n", encoding="utf-8")
+        p.write_text(payload if payload is not None else f"// produit par l'équipe factice ({behavior})\n", encoding="utf-8")
     if behavior == "outside":
         (cwd / "README.md").write_text("hors périmètre\n", encoding="utf-8")
     if behavior == "sensitive":
         (cwd / ".env").write_text("X=1\n", encoding="utf-8")
+    if behavior == "envdump":  # noms seulement + présence d'une valeur factice (jamais les valeurs)
+        names = sorted(os.environ)
+        leak = any("PMXFAKE" in v for v in os.environ.values())
+        out_f.write_text(f"Status: DONE\nENVNAMES: {' '.join(names)}\nFAKE_VALUE_SEEN: {leak}\n", encoding="utf-8")
+        sys.exit(0)
+    if behavior == "gitptr":  # redirige le pointeur .git du worktree vers un faux dépôt (doit être détecté avant tout git)
+        (cwd / ".git").write_text(f"gitdir: {cwd}/evil-gitdir\n", encoding="utf-8")
     status = "BLOCKED" if behavior == "blocked" else "DONE"
     out_f.write_text(f"Work item | Role developer\nStatus: {status}\nFiles touched: {files}\nEvidence: fake\n", encoding="utf-8")
 elif kind == "review":

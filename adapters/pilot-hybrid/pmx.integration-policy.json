@@ -1,0 +1,21 @@
+{
+  "_comment": "Politique d'intégration du mode hybride. require_isolated_verification=true est OBLIGATOIRE dans ce mode (pmx refuse de fonctionner sinon). Chaque intégration réelle est lancée par l'humain dans son propre terminal (--approved-by + phrase de confirmation).",
+  "mode": "local-only",
+  "target_branch": "pilot/integration",
+  "path_allowlist": [
+    "src/*",
+    "src/**",
+    "test/*",
+    "test/**"
+  ],
+  "require_review_verdict": [
+    "APPROVE"
+  ],
+  "never": [
+    "push",
+    "merge into protected branches",
+    "MR/PR creation",
+    "deletion of user data"
+  ],
+  "require_isolated_verification": true
+}
