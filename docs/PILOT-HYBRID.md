@@ -14,7 +14,7 @@ Exemple complet : `adapters/pilot-hybrid/` (`project-manager.config.json`, `sett
 
 Les deux CLI gardent vos sessions (le processus de la CLI n'est pas enfermé). En revanche, **leurs outils** (commandes shell, et outils de fichiers de Claude) sont confinés au worktree par les sandbox natifs des éditeurs, tous deux basés sur bubblewrap sous WSL2. Les réglages sont **générés par `pmx`** pour chaque appel ; `~/.claude` et `~/.codex` ne sont ni lus ni modifiés.
 
-- **Claude Code** (≥ 2.1.257) : `--settings` généré à côté du prompt, hors du worktree. Il reprend la politique de l'équipe et ajoute :
+- **Claude Code** (≥ 2.1.257) : **une équipe n'a pour l'instant pas d'outil shell, dans ce profil uniquement** (`--tools Read,Grep,Glob,Edit,Write`, et `Bash` en `deny`). Elle écrit par ses outils de fichiers, soumis aux règles, et ne lance aucun test : le verdict vient de `pmx verify`, en conteneur. Voir « Pourquoi pas de Bash » ci-dessous. `--settings` est généré à côté du prompt, hors du worktree. Il reprend la politique de l'équipe et ajoute :
   - `permissions.blockReadsOutsideWorkingDirectories: true` ;
   - `sandbox.enabled: true`, `failIfUnavailable: true`, `allowUnsandboxedCommands: false` ;
   - `filesystem.denyRead` : `~/`, `/mnt`, `/run/WSL`, `/mnt/wsl`, `/var/run/docker.sock`, `/run/docker.sock`, `/tmp` ;
@@ -43,7 +43,55 @@ Les deux CLI gardent vos sessions (le processus de la CLI n'est pas enfermé). E
 
   Toute anomalie arrête `pmx` (code 64) : **aucun agent lancé, aucun repli non isolé**. Claude, lui, échoue d'office si son sandbox ne démarre pas (`failIfUnavailable`) : vérifié avec un `bwrap` factice.
 
+### Pourquoi pas de Bash pour l'équipe Claude (temporaire)
+
+Sous Linux et WSL2, chaque commande sandboxée de Claude Code protège en écriture les chemins sensibles absents (25 entrées : `.claude/settings.json`, `.claude/hooks`, `.mcp.json`, `.gitconfig`, `.bashrc`, `.vscode`…). Pour cela, `bwrap` crée **sur l'hôte, dans le worktree**, un fichier vide en mode 444 à chacun de ces chemins, qui lui sert de point de montage pour `/dev/null`. Claude Code les supprime à la fin de la commande, et ils restent si la session est tuée (comportement [documenté](https://code.claude.com/docs/en/sandboxing), mesuré sur 2.1.311, 2.1.314 et 2.1.317).
+
+Pendant toute la commande, `git status` les voit, et le contrôle de périmètre de `pmx` déclenche l'arrêt critique. Rien ne distingue ces fichiers, par leur seul aspect, d'une écriture de l'agent. `pmx` **n'accorde donc aucune exception** : sans commande sandboxée, ces fichiers n'existent pas, et le garde-fou reste entier.
+
+Conséquence fonctionnelle : l'équipe Claude ne peut pas lancer de tests, de lint ni de build ; un échec n'apparaît qu'à `pmx verify`. L'équipe Codex garde son shell : son sandbox ne crée que des répertoires vides (`.codex`, `.agents`, `.aws`), invisibles pour Git.
+
+Ce retrait ne concerne que `orchestration.mode = "host-agents+docker-verification"` avec `confinement = "native"`. Le mode par défaut, même avec `confinement = "native"`, garde `Bash`.
+
+### Arrêt critique vérifié
+
+`pmx` lance chaque tentative dans son propre scope systemd utilisateur (`systemd-run --user --scope`), sans privilège ni changement de configuration, donc dans son propre cgroup v2. Le nom du scope est tiré au hasard. Un descendant reste dans le cgroup même s'il change de groupe de processus ou de session, et l'identité ne dépend plus d'un PID. Ce suivi est **obligatoire en profil hybride** : sans lui, aucun agent n'est lancé.
+
+Déroulement d'un arrêt :
+
+1. L'état bloquant (`stop.state = IN_PROGRESS`) est écrit **avant tout signal**.
+2. SIGTERM va aux seuls membres confirmés : `pidfd`, puis relecture de l'appartenance au cgroup.
+3. Après 1 s au plus, `cgroup.kill` envoie SIGKILL à tout le cgroup.
+4. Pendant 5 s au plus, `pmx` attend `populated 0` ou la disparition du cgroup.
+5. La preuve va dans `ai_memory/runs/<run>/stop-evidence.jsonl`, et le verdict est `STOPPED` ou `UNRESOLVED`.
+
+« Équipes arrêtées » ne s'affiche qu'avec `STOPPED`. Tant que l'état reste `IN_PROGRESS` ou `UNRESOLVED`, `dispatch`, `debate`, `verify`, `review`, `integrate` et `reopen` sont refusés. `tick` reprend et revérifie, y compris après la mort du manager pendant l'arrêt : c'est le seul chemin vers `STOPPED`.
+
+**Verdict technique et acquittement sont distincts.** `stop-ack --by human:<nom>`, au terminal, consigne qui a pris connaissance de l'incident et les cgroups vus actifs. Il ne change pas le verdict, ne prouve rien et ne débloque rien : ni relance, ni intégration.
+
+**Récupération manuelle**, si la preuve reste impossible :
+
+1. Contrôler et arrêter soi-même les processus restants (`status`, `stop-evidence.jsonl`).
+2. Conserver le run bloqué, ses worktrees et ses preuves en l'état : `pmx` ne les débloque jamais.
+3. Reprendre le travail dans un **nouveau run** (`start`).
+
+**Fin normale d'une tentative.** Avant d'exploiter le résultat et de commiter, `pmx` vérifie le cgroup, arrête les descendants encore actifs, revérifie et enregistre la preuve (`attempt_end`). Sans preuve : aucun commit, arrêt critique, verdict `UNRESOLVED` si elle reste impossible. `pmx` ne supprime jamais un cgroup : systemd le retire une fois vide.
+
+**Débat et revue.** Leurs agents utilisent le même scope et la même fonction d'arrêt. Ils sont enregistrés avant leur lancement : l'arrêt critique les atteint, aucun nouvel agent ne part après un arrêt survenu pendant la commande, et si le manager meurt, la commande `pmx` suivante les arrête et le prouve (`helper_end`). Un agent de débat ou de revue en adaptateur `docker` ou `drop` reste hors de ce suivi.
+
+Hors profil hybride, sans systemd utilisateur, l'équipe se lance sans cgroup : le groupe n'est signalé que si son chef porte encore la même heure de démarrage, et tout arrêt critique reste `UNRESOLVED`, car rien ne prouve l'arrêt des descendants hors groupe. Une fin normale y est signalée « non vérifiée » (`status`, `UNVERIFIED` dans la preuve) sans bloquer le run.
+
+Limites : un processus du même utilisateur qui écrit dans un autre `cgroup.procs` de son sous-arbre délégué pourrait sortir du cgroup. Cette sortie a été observée bloquée pour Codex, dans son sandbox, par une sonde externe au dépôt (`codex_escape.py`), et non par `live_hybrid.py`. Le même comportement n'a pas été mesuré directement pour Claude. Aucune garantie générale de résistance à l'évasion du cgroup n'est revendiquée. Le scope dépend du gestionnaire `systemd --user`. Un descendant qui garde la sortie standard de l'agent retarde la fin de la tentative jusqu'à `team_timeout_s` : il n'est arrêté qu'à ce moment.
+
+#### Évolution : shell Claude sécurisé
+
+La capacité n'est pas retirée de l'architecture : `confined_team_without_shell()` est le seul point de décision, et le bloc `sandbox` reste généré. Rétablir le shell demande d'abord, dans `scope_check`, une **preuve technique** qu'un fichier est un artefact vivant du sandbox, jamais une exception sur son nom, sa taille ou son mode. La piste mesurée est le point de montage `/dev/null` visible dans `mountinfo`. Elle n'est ni implémentée ni validée.
+
+`.mcp.json` reste un chemin sensible dans tous les cas : refusé dans les plans, arrêt critique à l'exécution.
+
 ### Contrôles réels du confinement (`live_hybrid.py`, scénario C, 2026-10-28)
+
+*Ce tableau date de la version où l'équipe Claude avait encore Bash. Depuis, elle n'a plus de shell : les lignes portant sur les commandes ne la concernent plus. Re-mesuré sur Claude Code 2.1.314 et 2.1.317 : outils `Read` et `Write` refusés hors worktree et sur `.claude/settings.json` et `.mcp.json` ; aucun artefact ; Codex inchangé.*
 
 Claude Code 2.1.311 et Codex 0.162.1, lancés avec exactement la commande de `pmx`. Les cibles sont factices et ont été supprimées. Une sonde de 16 contrôles est exécutée **par l'agent**, et les écritures sont vérifiées sur l'hôte.
 
@@ -81,9 +129,9 @@ La vérification n'a **jamais de repli sur l'hôte**. Docker absent, image absen
 
 ## Permissions natives appliquées par `pmx`
 
-- **Claude Code** : `claude -p --settings .claude/settings.hybrid.json`. Pour une équipe, outils `Read,Grep,Glob,Edit,Write,Bash` et `--permission-mode acceptEdits` ; pour le débat et la revue, `Read,Grep,Glob` en mode `default`.
+- **Claude Code** : `claude -p --settings .claude/settings.hybrid.json`. Pour une équipe, outils `Read,Grep,Glob,Edit,Write` (sans `Bash`) et `--permission-mode acceptEdits` ; pour le débat et la revue, `Read,Grep,Glob` en mode `default`.
   - Écriture limitée à `src/**` et `test/**`.
-  - Bash limité à `python3 -B -m unittest` et aux commandes `git` en lecture.
+  - Aucun shell en confinement natif : les règles `Bash(...)` de `settings.hybrid.json` ne servent qu'hors de ce mode.
   - Refusés : `docker`, `podman`, `sudo`, `ssh`, `curl`, `wget`, `nc`, installations de paquets, `git push` et `git remote`, ainsi que la lecture de `~/.ssh`, `~/.claude`, `~/.codex`, `~/.config`, `~/.docker`, `~/.aws`, etc.
   - Modification de `.git`, `.claude`, des hooks et de `.gitattributes` refusée.
 - **Codex CLI** : `codex exec --sandbox workspace-write` pour une équipe, `read-only` pour le débat et la revue. `pmx` ajoute **toujours** les réglages suivants, en ligne de commande, sans lire ni modifier `~/.codex/config.toml` :

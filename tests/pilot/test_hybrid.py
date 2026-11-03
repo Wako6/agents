@@ -130,7 +130,7 @@ class Hybrid(test_docker.Docker):
         """PATH de test : outils réels sauf `drop`, et un faux `codex` dont la sous-commande sandbox se comporte comme demandé."""
         b = self.tmp / f"bin-{time.time_ns()}"
         b.mkdir()
-        for tool in ("git", "test", "sh", "cat", "docker", "bwrap", "socat", "python3", "claude"):
+        for tool in ("git", "test", "sh", "cat", "docker", "bwrap", "socat", "python3", "claude", "systemd-run", "env"):
             src = shutil.which(tool)
             if src and tool not in drop:
                 os.symlink(src, b / tool)
@@ -212,6 +212,197 @@ class Hybrid(test_docker.Docker):
         self.assertEqual(json.loads(pathlib.Path(ro[ro.index("--settings") + 1]).read_text())["sandbox"]["filesystem"]["allowWrite"], [])
         os.environ["WSL_INTEROP"] = "/run/WSL/0_interop"
         self.assertNotIn("WSL_INTEROP", m.agent_env())
+
+    # ------------------------------------------------------------------ artefacts du sandbox Claude : le garde-fou reste sans exception
+
+    VIOLATIONS = (("viol-empty", ".claude/settings.json : chemin sensible"), ("viol-nonempty", ".claude/settings.json : chemin sensible"),
+                  ("viol-readonly", ".claude/settings.json : chemin sensible"), ("viol-placeholders", ".claude/settings.json : chemin sensible"),
+                  ("viol-symlink", "lien symbolique"), ("viol-modify", ".claude/project-manager.config.json : chemin sensible"),
+                  ("viol-mcp", ".mcp.json : chemin sensible"), ("viol-fifo", "fichier spécial"), ("viol-livemount", ".claude/settings.json : chemin sensible"))
+
+    def test_h16_sensitive_changes_always_stop_both_teams_and_keep_evidence(self):
+        for behavior, why in self.VIOLATIONS:
+            if behavior == "viol-livemount" and not shutil.which("bwrap"):
+                continue
+            with self.subTest(behavior=behavior):
+                self.tmp_reset()
+                self.hconfig({"team-a": test_pmx.team(behavior), "team-b": test_pmx.team("crash")})
+                run, wis = self.to_approved([self.task("a", "team-a", ["src/a.js"]), self.task("b", "team-b", ["src/b.js"])])
+                self.pmx("dispatch", "--run", run, code=0)
+                pid_b = self.run_state(run)["tasks"]["b"]["attempts"][0]["pid"]
+                p = self.pmx("wait", "--run", run, "--interval", "0.3", code=3)
+                self.assertIn(why, p.stdout + p.stderr)
+                time.sleep(1.5)
+                self.assertFalse(pathlib.Path(f"/proc/{pid_b}").exists() and "Z" not in pathlib.Path(f"/proc/{pid_b}/stat").read_text().split(") ")[1][:1])
+                for wi in wis:
+                    self.assertEqual(self.status_of(wi), "BLOCKED")  # les deux équipes
+                st = self.run_state(run)
+                self.assertTrue(pathlib.Path(st["tasks"]["a"]["attempts"][0]["worktree"]).exists())  # preuves conservées
+                self.assertIn("critical_abort", (self.root / "ai_memory" / "runs" / run / "events.jsonl").read_text())
+                self.assertEqual(self.git("rev-parse", st["tasks"]["a"]["attempts"][0]["branch"]), self.git("rev-parse", "main"))  # aucun commit
+
+    def test_h19_changed_paths_for_tracked_untracked_renamed_deleted(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pmx", test_pmx.PMX)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        def fresh(*files):
+            (self.root / "t").mkdir(exist_ok=True)
+            for f in files:
+                (self.root / f).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / f).write_text("a\n")
+            self.git("add", "-A")
+            self.git("commit", "-qm", "base")
+        fresh("a/one.js", "a/two.js", ".claude/keep.json", "b/old.js")
+        (self.root / "a" / "one.js").write_text("b\n")  # suivi modifié, en première ligne
+        self.assertEqual(m.changed_paths(self.root, "HEAD"), ({"a/one.js"}, set()))
+        self.git("checkout", "-q", "--", "a/one.js")
+        (self.root / ".claude" / "keep.json").unlink()  # suivi supprimé, en première ligne : le point initial ne se perd pas
+        self.assertEqual(m.changed_paths(self.root, "HEAD"), ({".claude/keep.json"}, {".claude/keep.json"}))
+        self.assertEqual(m.classify(".claude/keep.json"), "guardrail")
+        self.git("checkout", "-q", "--", ".claude/keep.json")
+        (self.root / ".envnew").write_text("x\n")  # non suivi
+        self.assertEqual(m.changed_paths(self.root, "HEAD"), ({".envnew"}, set()))
+        (self.root / ".envnew").unlink()
+        self.git("mv", "b/old.js", "b/new.js")  # renommé, indexé
+        self.assertEqual(m.changed_paths(self.root, "HEAD"), ({"b/old.js", "b/new.js"}, {"b/old.js"}))
+        self.git("mv", "b/new.js", "b/old.js")
+        (self.root / "b" / "old.js").rename(self.root / "b" / "moved.js")  # renommé, non indexé
+        self.assertEqual(m.changed_paths(self.root, "HEAD"), ({"b/old.js", "b/moved.js"}, {"b/old.js"}))
+        (self.root / "b" / "moved.js").rename(self.root / "b" / "old.js")
+        self.git("mv", "a/two.js", "a/three.js")  # renommé puis commité : vu par le diff base..HEAD
+        base = self.git("rev-parse", "HEAD")
+        self.git("commit", "-qm", "rename")
+        self.assertEqual(m.changed_paths(self.root, base), ({"a/two.js", "a/three.js"}, {"a/two.js"}))
+
+    def test_h20_mcp_json_refused_in_plans_and_during_execution(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pmx", test_pmx.PMX)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        self.assertEqual(m.classify(".mcp.json"), "guardrail")
+        self.assertEqual(m.classify("sub/dir/.mcp.json"), "guardrail")
+        self.hconfig()
+        run = self.pmx("start", "--title", "Demo", "--request", "q", code=0).stdout.strip()
+        self.pmx("debate", "next", "--run", run, code=0)
+        self.pmx("decide", "--run", run, "--by", "consensus", code=0)
+        for f in (".mcp.json", "src/.mcp.json"):
+            t = {**self.task("a", "team-a", ["src/a.js"]), "files": [f]}
+            p = self.pmx("plan", "submit", "--run", run, "--file", str(self.plan([t])), code=1)
+            self.assertIn("chemin sensible (guardrail)", p.stdout, f)
+        self.assertIn("Edit(.mcp.json)", json.loads((HERE.parents[1] / "adapters" / "pilot-hybrid" / "settings.hybrid.json").read_text())["permissions"]["deny"])
+
+    def test_h21_disable_autoupdater_changes_no_protection(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pmx", test_pmx.PMX)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        (self.root / ".claude" / "s.json").write_text(json.dumps(SETTINGS_OK))
+        self.hconfig({"team-a": {"adapter": "claude-cli", "settings": ".claude/s.json"}, "team-b": test_pmx.team("ok")})
+        ctx = m.Ctx(self.root)
+        old = dict(os.environ)
+        try:
+            os.environ["DISABLE_AUTOUPDATER"] = "0"  # valeur de l'hôte sans effet
+            env = m.agent_env()
+            self.assertEqual(env["DISABLE_AUTOUPDATER"], "1")
+            self.assertEqual({k: v for k, v in env.items() if "AUTOUPDATER" in k}, {"DISABLE_AUTOUPDATER": "1"})  # une seule variable ajoutée
+            with_var = m.claude_confined_settings(ctx, ctx.o["teams"]["team-a"], self.tmp, "write", self.tmp / "a.json").read_text()
+            probs_with = m.bypass_problems(ctx) + m.mode_problems(ctx)
+            del os.environ["DISABLE_AUTOUPDATER"]
+            without = m.claude_confined_settings(ctx, ctx.o["teams"]["team-a"], self.tmp, "write", self.tmp / "b.json").read_text()
+            self.assertEqual(with_var, without)  # réglages de sandbox et de permissions identiques
+            self.assertEqual(probs_with, m.bypass_problems(ctx) + m.mode_problems(ctx))
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_h22_no_cgroup_tracking_refuses_agents_without_fallback(self):
+        run, p = self.dispatch_with(self.stub_bin(drop=("systemd-run",)), {"team-a": test_pmx.team("ok"), "team-b": test_pmx.team("ok")})
+        self.assertEqual(p.returncode, 64, p.stdout + p.stderr)
+        self.assertIn("suivi des tentatives par cgroup indisponible", p.stdout + p.stderr)
+        self.assertEqual(json.loads((self.root / "ai_memory" / "runs" / run / "run.json").read_text())["tasks"]["a"]["attempts"], [])
+
+    def test_h18_first_status_line_path_is_not_truncated(self):
+        # `git status --porcelain` commence par une espace pour un fichier suivi modifié : son chemin ne doit perdre aucun caractère
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pmx", test_pmx.PMX)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        (self.root / "xsrc").mkdir()
+        (self.root / "xsrc" / "a.js").write_text("a\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "suivi")
+        (self.root / "xsrc" / "a.js").write_text("b\n")
+        paths, _ = m.changed_paths(self.root, "HEAD")
+        self.assertEqual(paths, {"xsrc/a.js"})  # et non « src/a.js », qu'un périmètre aurait autorisé
+        self.hconfig()
+        run, wis = self.to_approved([self.task("a", "team-a", ["src/a.js"])])
+        wi = next(iter(wis))
+        ctx = m.Ctx(self.root)
+        wt = self.tmp / "wt-x"
+        self.git("worktree", "add", "-q", "-b", "x", str(wt))
+        (wt / "xsrc" / "a.js").write_text("c\n")
+        bad, _ = m.scope_check(ctx, {"files": ["src/a.js"], "wi": wi}, str(wt), "HEAD")
+        self.assertTrue(any("xsrc/a.js : hors périmètre" in b for b in bad), bad)
+
+    @unittest.skipUnless(shutil.which("claude"), "CLI claude absente")
+    def test_h17_confined_claude_team_has_no_shell(self):
+        import importlib.util
+        (self.root / ".claude" / "s.json").write_text(json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Read", "Bash(python3 -B -m unittest:*)"], "deny": ["Bash(docker:*)"]}}))
+        self.hconfig({"team-a": {"adapter": "claude-cli", "settings": ".claude/s.json"}, "team-b": test_pmx.team("ok")},
+                     debate=("consensus", "consensus"))
+        run, wis = self.to_approved([self.task("a", "team-a", ["src/a.js"])])
+        spec = importlib.util.spec_from_file_location("pmx", test_pmx.PMX)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        ctx = m.Ctx(self.root)
+        wt = self.tmp / "wt" / "x"
+        wt.mkdir(parents=True)
+        pf = self.tmp / "brief.md"
+        pf.write_text("brief")
+        acfg = ctx.o["teams"]["team-a"]
+        argv, _ = m.agent_argv(ctx, acfg, pf, self.tmp / "o.md", wt, "write")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Edit,Write")
+        gen = json.loads(pathlib.Path(argv[argv.index("--settings") + 1]).read_text())
+        self.assertIn("Bash", gen["permissions"]["deny"])  # l'emporte sur la règle allow de la politique de l'équipe
+        self.assertIn("Bash(docker:*)", gen["permissions"]["deny"])  # politique conservée
+        self.assertTrue(gen["sandbox"]["enabled"] and gen["sandbox"]["failIfUnavailable"])  # sandbox non affaibli
+        self.assertFalse(gen["sandbox"]["allowUnsandboxedCommands"])
+        brief = m.team_brief(ctx, ctx.load_run(run), "a", 1, wt, self.tmp / "r.md")
+        self.assertIn("aucun outil shell", brief)
+        self.assertIn("pmx verify", brief)
+        section = brief.split("## Vérification attendue")[1].split("## ")[0]
+        self.assertNotIn("colle la sortie", section)
+        self.assertIn("remplace", section)  # la ligne du rôle `developer` sur le lancement des tests ne s'applique pas
+        # lecture (débat, revue) : jamais de shell, quel que soit le mode
+        ro, _ = m.agent_argv(ctx, acfg, pf, self.tmp / "o.md", wt, "read")
+        self.assertEqual(ro[ro.index("--tools") + 1], "Read,Grep,Glob")
+        # capacité conservée : un seul point de décision ; le bloc sandbox et les règles restent générés
+        m.CONFINED_CLAUDE_TEAM_SHELL = True
+        argv, _ = m.agent_argv(ctx, acfg, pf, self.tmp / "o.md", wt, "write")
+        self.assertIn("Bash", argv[argv.index("--tools") + 1])
+        gen2 = json.loads(pathlib.Path(argv[argv.index("--settings") + 1]).read_text())
+        self.assertNotIn("Bash", gen2["permissions"]["deny"])
+        self.assertEqual(gen2["sandbox"], gen["sandbox"])
+        self.assertIn("colle la sortie", m.team_brief(ctx, ctx.load_run(run), "a", 1, wt, self.tmp / "r.md").split("## Vérification attendue")[1].split("## ")[0])
+        m.CONFINED_CLAUDE_TEAM_SHELL = False
+        # hors confinement natif : comportement 3.1 inchangé (aucun sandbox, donc aucun artefact)
+        ctx.o["confinement"] = None
+        argv, _ = m.agent_argv(ctx, acfg, pf, self.tmp / "o.md", wt, "write")
+        self.assertIn("Bash", argv[argv.index("--tools") + 1])
+        self.assertEqual(argv[argv.index("--settings") + 1], str((self.root / ".claude" / "s.json").resolve()))  # réglages de l'équipe, sans ajout
+        # confinement natif hors profil hybride : shell conservé, autres protections inchangées
+        ctx.o["confinement"], ctx.o["mode"] = "native", "default"
+        argv, _ = m.agent_argv(ctx, acfg, pf, self.tmp / "o.md", wt, "write")
+        self.assertIn("Bash", argv[argv.index("--tools") + 1])
+        gen3 = json.loads(pathlib.Path(argv[argv.index("--settings") + 1]).read_text())
+        self.assertNotIn("Bash", gen3["permissions"]["deny"])
+        self.assertEqual(gen3["sandbox"], gen["sandbox"])
+        ctx.o["mode"] = m.HYBRID
+        # les autres adaptateurs ne dépendent pas de ce choix
+        cx, _ = m.agent_argv(ctx, {"adapter": "codex-cli"}, pf, self.tmp / "o.md", wt, "write")
+        self.assertIn('default_permissions="pmx-ws"', cx)
+        self.assertNotIn("--tools", cx)
 
     def test_h09_example_adapter_is_consistent(self):
         kit = HERE.parents[1] / "adapters" / "pilot-hybrid"

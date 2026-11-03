@@ -54,6 +54,42 @@ elif kind == "team":
         (cwd / "README.md").write_text("hors périmètre\n", encoding="utf-8")
     if behavior == "sensitive":
         (cwd / ".env").write_text("X=1\n", encoding="utf-8")
+    if behavior.startswith("viol-"):  # violations volontaires (toutes doivent déclencher l'arrêt critique, garde-fou sans exception)
+        for f in files:
+            (cwd / f).parent.mkdir(parents=True, exist_ok=True)
+            (cwd / f).write_text("// ok\n", encoding="utf-8")
+        s = cwd / ".claude" / "settings.json"
+        s.parent.mkdir(exist_ok=True)
+        if behavior == "viol-empty":  # fichier sensible vide
+            s.write_text("", encoding="utf-8")
+        elif behavior == "viol-nonempty":  # fichier sensible non vide
+            s.write_text('{"permissions": {"allow": ["*"]}}\n', encoding="utf-8")
+        elif behavior == "viol-readonly":  # sensible, vide, 444 : exactement l'aspect d'un artefact du sandbox
+            s.write_text("", encoding="utf-8")
+            s.chmod(0o444)
+        elif behavior == "viol-placeholders":  # toute la famille d'aspect « artefact », créée par l'agent
+            for n in (".claude/settings.json", ".claude/hooks", ".mcp.json", ".gitconfig", ".gitattributes", ".bashrc", ".zshrc", ".vscode"):
+                q = cwd / n
+                q.write_text("", encoding="utf-8")
+                q.chmod(0o444)
+        elif behavior == "viol-symlink":  # lien symbolique vers un chemin sensible, dans le périmètre
+            q = cwd / files[0]
+            q.unlink()
+            q.symlink_to(cwd / ".claude" / "project-manager.config.json")
+        elif behavior == "viol-modify":  # modification d'un fichier sensible suivi, pendant l'exécution
+            q = cwd / ".claude" / "project-manager.config.json"
+            q.write_text(q.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        elif behavior == "viol-mcp":  # écriture dans .mcp.json
+            (cwd / ".mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+        elif behavior == "viol-fifo":  # fichier spécial
+            os.mkfifo(cwd / ".claude" / "pipe")
+        elif behavior == "viol-livemount":  # vrai montage /dev/null, vivant, sur un chemin sensible : ne vaut aucune exception
+            import subprocess
+            subprocess.run(["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--bind", str(cwd), str(cwd), "--ro-bind", "/dev/null", str(s),
+                            "--die-with-parent", "sleep", "6"], check=False)
+        time.sleep(3)
+        out_f.write_text("Status: DONE\n", encoding="utf-8")
+        sys.exit(0)
     if behavior == "envdump":  # noms seulement + présence d'une valeur factice (jamais les valeurs)
         names = sorted(os.environ)
         leak = any("PMXFAKE" in v for v in os.environ.values())
