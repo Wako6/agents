@@ -49,7 +49,7 @@ Codes : 0 ok · 1 échec/refus · **2 décision humaine** · **3 échec critique
 - **Automatique** (dans les worktrees isolés uniquement) : lecture, écriture des fichiers du périmètre, exécution des tests, `git worktree add`, commits locaux sur `pilot/*` par `pmx`.
 - **Toujours humain** : secrets/identifiants, permissions, hooks/garde-fous, branches protégées, suppressions, production, toute opération distante (push, MR, GitLab), toute fusion (y compris locale : confirmation saisie au terminal de l'humain ; `--approved-by` n'est qu'un nom déclaré, pas une preuve), toute nouvelle commande de test (`allowed_test_commands`).
 - **Profil hybride recommandé** (`orchestration.mode = "host-agents+docker-verification"`, exemple `adapters/pilot-hybrid/`).
-  - Claude Code et Codex tournent sur l'hôte avec leurs authentifications existantes ; leurs outils sont confinés au worktree par leurs sandbox natifs (`confinement: native`, réglages imposés par `pmx`, préflight avant tout agent).
+  - Claude Code et Codex tournent sur l'hôte avec leurs authentifications existantes ; leurs outils sont confinés au worktree par leurs sandbox natifs (`confinement: native`, réglages imposés par `pmx`, préflight avant tout agent). L'équipe Claude n'a pas de shell : elle ne lance aucun test, et le verdict vient de `pmx verify`.
   - Toute vérification se fait en conteneur, et `pmx` refuse de fonctionner si ce n'est pas garanti. Les accès que les CLI gardent sur l'hôte sont listés dans `docs/PILOT-HYBRID.md` : les présenter à l'utilisateur.
   - Ne jamais ajouter de drapeau de contournement : `pmx` le refuse.
 - Adaptateur `docker` (opt-in, **expérimental**) :

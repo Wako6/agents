@@ -47,6 +47,7 @@
       "Edit(**/hooks/**)",
       "Edit(.gitlab-ci.yml)",
       "Edit(.gitattributes)",
+      "Edit(.mcp.json)",
       "Bash(docker:*)",
       "Bash(podman:*)",
       "Bash(nerdctl:*)",

@@ -19,7 +19,7 @@ ledger) — pmx n'en crée pas d'autre ; l'état technique d'exécution (PID, wo
 Codes de sortie : 0 ok · 1 échec / refus · 2 décision humaine requise · 3 échec critique (équipes arrêtées)
 · 10 en attente d'un agent externe (drop) · 64 usage.
 """
-import argparse, datetime, fcntl, fnmatch, hashlib, json, os, pathlib, re, shlex, shutil, signal, subprocess, sys, time, urllib.parse
+import argparse, datetime, errno, fcntl, fnmatch, hashlib, json, os, pathlib, re, secrets, shlex, shutil, signal, subprocess, sys, time, urllib.parse
 
 SCHEMA = "pm-v3/1"
 EXIT_OK, EXIT_FAIL, EXIT_HUMAN, EXIT_CRITICAL, EXIT_WAIT, EXIT_USAGE = 0, 1, 2, 3, 10, 64
@@ -35,7 +35,7 @@ DEFAULTS = {
 # Chemins qui exigent toujours une validation humaine (secrets, permissions, hooks/garde-fous, CI/production).
 SENSITIVE = [
     ("secret", [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*secret*", "*credential*", "*token*", ".npmrc", ".pypirc", ".netrc"]),
-    ("guardrail", [".claude/*", ".claude/**", ".git/*", ".git", "*/.git", "*/.git/*", ".gitattributes", ".gitmodules", ".githooks/*", ".husky/*", "hooks/*", "*/hooks/*", "*settings*.json", ".pre-commit-config.yaml", "CODEOWNERS", "ai_rules/*", ".claude/rules/*"]),
+    ("guardrail", [".claude/*", ".claude/**", ".git/*", ".git", "*/.git", "*/.git/*", ".gitattributes", ".gitmodules", ".githooks/*", ".husky/*", "hooks/*", "*/hooks/*", "*settings*.json", ".pre-commit-config.yaml", "CODEOWNERS", ".mcp.json", "ai_rules/*", ".claude/rules/*"]),
     ("production", [".gitlab-ci.yml", ".github/workflows/*", "deploy/*", "k8s/*", "helm/*", "terraform/*", "*.tf", "Dockerfile", "docker-compose*.yml"]),
 ]
 # Commandes de test : exécutées sans shell ; ces caractères signalent une tentative d'enchaînement ou de substitution.
@@ -71,11 +71,11 @@ def git_env(extra=None):
     return e
 
 
-def git(root, *args, check=True, env=None):
+def git(root, *args, check=True, env=None, strip=True):
     p = subprocess.run([*GIT_SAFE, "-C", str(root), *args], capture_output=True, text=True, env=git_env(env))
     if check and p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} → {p.returncode}: {p.stderr.strip()}")
-    return p.stdout.strip()
+    return p.stdout.strip() if strip else p.stdout  # strip=False : `status --porcelain` (la 1re colonne peut être une espace)
 
 
 GIT_ID = ["-c", "user.name=pmx-pilot", "-c", "user.email=pmx-pilot@invalid", "-c", "commit.gpgsign=false"]
@@ -421,6 +421,257 @@ def confined(ctx):
     return ctx.o.get("confinement") == "native"
 
 
+# ---------------------------------------------------------------- suivi des tentatives (cgroup v2, scope systemd utilisateur)
+# Chaque tentative tourne dans son propre scope, sans privilège. Un descendant ne quitte pas son cgroup en changeant de groupe de
+# processus ou de session, et le nom du scope, tiré au hasard, ne se réutilise pas : l'identité ne dépend ni d'un PID ni d'un PGID.
+TEAM_UNIT_RE = re.compile(r"pmx-team-[0-9a-f]{16}\.scope")
+STOP_TERM_S, STOP_VERIFY_S = 1.0, 5.0
+_TRACKING = _SCOPE_PARENT = _STOP_AT_START = None
+# Le verdict technique et l'acquittement sont distincts : `stop-ack` consigne, seul `tick` peut établir STOPPED.
+STOP_RECOVERY = ("reprise impossible tant que l'arrêt n'est pas prouvé. `tick` revérifie. Sinon, récupération manuelle : contrôler et arrêter les processus "
+                 "soi-même, conserver ce run et ses preuves en l'état, ouvrir un nouveau run (`start`). `stop-ack` consigne l'incident et ne débloque rien")
+
+
+def team_scope_argv(unit):
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", "--"]
+
+
+def team_tracking_problem():
+    """Essai réel, une fois par processus pmx : None si un scope utilisateur est créable, sinon la raison."""
+    global _TRACKING, _SCOPE_PARENT
+    if _TRACKING is None:
+        unit = f"pmx-probe-{secrets.token_hex(8)}.scope"
+        try:
+            p = subprocess.run([*team_scope_argv(unit), "cat", "/proc/self/cgroup"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+            _TRACKING = "" if p.returncode == 0 and unit in p.stdout else ((p.stderr or p.stdout).strip().split("\n")[0][:160] or f"code {p.returncode}")
+            if not _TRACKING:
+                _SCOPE_PARENT = re.search(r"^0::(.*)/" + re.escape(unit) + "$", p.stdout, re.M).group(1)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            _TRACKING = f"systemd-run indisponible ({type(e).__name__})"
+    return _TRACKING or None
+
+
+def proc_cgroup(pid):
+    """Chemin cgroup v2 d'un processus, ou None."""
+    try:
+        m = re.search(r"^0::(.*)$", pathlib.Path(f"/proc/{pid}/cgroup").read_text(), re.M)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def proc_start(pid):
+    """Heure de démarrage du processus (ticks depuis le boot, /proc/<pid>/stat champ 22), ou None."""
+    try:
+        return int(pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def attempt_cgroup(att):
+    """Répertoire du cgroup d'une tentative. None si le chemin enregistré n'a pas la forme attendue : identité incertaine."""
+    rel, unit = att.get("cgroup") or "", att.get("unit") or ""
+    if not TEAM_UNIT_RE.fullmatch(unit) or not rel.startswith("/") or ".." in rel or pathlib.PurePosixPath(rel).name != unit:
+        return None
+    return pathlib.Path("/sys/fs/cgroup" + rel)
+
+
+def cgroup_gone(e):
+    """Cgroup supprimé, ou en cours de suppression pendant l'accès (ENODEV)."""
+    return e.errno in (errno.ENOENT, errno.ENODEV)
+
+
+def cgroup_populated(cg):
+    """False : aucun processus vivant (un cgroup peuplé ne peut pas être supprimé, son absence vaut donc vide). True : peuplé. None : indéterminé."""
+    try:
+        m = re.search(r"^populated ([01])$", (cg / "cgroup.events").read_text(), re.M)
+    except OSError as e:
+        return False if cgroup_gone(e) else None
+    return m.group(1) == "1" if m else None
+
+
+def cgroup_term(cg, rel):
+    """SIGTERM aux seuls membres confirmés : le pidfd fige le processus, puis son appartenance au cgroup est relue. → (signalés, erreurs)"""
+    try:
+        pids = [int(x) for x in (cg / "cgroup.procs").read_text().split()]
+    except OSError as e:
+        return [], [] if cgroup_gone(e) else [f"membres illisibles ({type(e).__name__})"]
+    except ValueError as e:
+        return [], [f"membres illisibles ({type(e).__name__})"]
+    sent, errs = [], []
+    for pid in pids:
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            continue
+        except OSError as e:
+            errs.append(f"pid {pid} : pidfd ({type(e).__name__})")
+            continue
+        try:
+            if proc_cgroup(pid) == rel:
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+                sent.append(pid)
+        except ProcessLookupError:
+            pass
+        except OSError as e:
+            errs.append(f"pid {pid} : SIGTERM ({type(e).__name__})")
+        finally:
+            os.close(fd)
+    return sent, errs
+
+
+def cgroup_kill(cg):
+    """SIGKILL atomique de tout le cgroup, sous-cgroups compris, par le noyau. → erreur ou None."""
+    try:
+        (cg / "cgroup.kill").write_text("1")
+    except OSError as e:
+        return None if cgroup_gone(e) else f"cgroup.kill ({type(e).__name__})"
+    return None
+
+
+def group_signal(pid, sig):
+    """Sans cgroup : signal au groupe, seulement si son chef est vivant. → erreur ou None."""
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+    except OSError as e:
+        return f"{sig.name} ({type(e).__name__})"
+    return None
+
+
+def stop_processes(targets):
+    """Arrêt vérifié de tentatives [(tâche, att)]. N'envoie aucun signal si l'identité est incertaine. → (preuves, problèmes)."""
+    rows, problems = [], []
+    for key, att in targets:
+        row = {"task": key, "attempt": att.get("n"), "unit": att.get("unit"), "cgroup": att.get("cgroup"), "pid": att.get("pid"), "pid_start": att.get("pid_start"), "term": [], "errors": []}
+        rows.append(row)
+        if att.get("unit") or att.get("cgroup"):
+            row["dir"] = attempt_cgroup(att)
+            if not row["dir"]:
+                row["errors"].append("identité incertaine : cgroup enregistré invalide, aucun signal")
+                continue
+            row["before"] = cgroup_populated(row["dir"])
+            if row["before"] is not False:
+                row["term"], errs = cgroup_term(row["dir"], att["cgroup"])
+                row["errors"] += errs
+        elif att.get("pid") and att.get("pid_start") and proc_start(att["pid"]) == att["pid_start"]:
+            row["confirmed"] = True
+            if (e := group_signal(att["pid"], signal.SIGTERM)):
+                row["errors"].append(e)
+            else:
+                row["term"] = [att["pid"]]
+        else:
+            row["errors"].append("identité du groupe non établie (chef disparu ou PID réutilisé), aucun signal")
+    deadline = time.time() + STOP_TERM_S
+    while time.time() < deadline and any(r.get("dir") and cgroup_populated(r["dir"]) is not False for r in rows):
+        time.sleep(0.05)
+    for r in rows:
+        if r.get("dir") and cgroup_populated(r["dir"]) is not False:
+            r["killed"] = True
+            if (e := cgroup_kill(r["dir"])):
+                r["errors"].append(e)
+        elif r.get("confirmed"):
+            time.sleep(max(0, deadline - time.time()))
+            # identité établie juste avant SIGTERM : un PGID n'est pas réutilisé tant que le groupe a des membres, et un nouveau chef se voit à sa date
+            if proc_start(r["pid"]) in (None, r["pid_start"]):
+                r["killed"] = True
+                if (e := group_signal(r["pid"], signal.SIGKILL)):
+                    r["errors"].append(e)
+            else:
+                r["errors"].append(f"PID {r['pid']} réutilisé pendant l'arrêt, aucun SIGKILL")
+    deadline = time.time() + STOP_VERIFY_S
+    while time.time() < deadline and any(r.get("dir") and cgroup_populated(r["dir"]) is not False for r in rows):
+        time.sleep(0.05)
+    for r in rows:
+        if r.get("dir"):
+            r["populated_after"] = cgroup_populated(r["dir"])
+            if r["populated_after"] is True:
+                r["errors"].append("processus encore actifs dans le cgroup après SIGKILL")
+            elif r["populated_after"] is None:
+                r["errors"].append("état du cgroup indéterminé après SIGKILL")
+        elif r.get("confirmed"):
+            r["errors"].append("sans cgroup : aucun moyen de prouver l'arrêt des descendants")
+        r["dir"] = str(r["dir"]) if r.get("dir") else None
+        problems += [f"{r['task']}#{r['attempt']} : {e}" for e in r["errors"]]
+    return rows, problems
+
+
+def stop_unresolved(st):
+    """Arrêt critique commencé (manager interrompu) ou non prouvé : rien ne repart, rien ne s'intègre. Un acquittement n'y change rien."""
+    return (st.get("stop") or {}).get("state") in ("IN_PROGRESS", "UNRESOLVED")
+
+
+def stop_evidence(ctx, run, record):
+    with open(ctx.run_dir(run) / "stop-evidence.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now(), **record}, ensure_ascii=False) + "\n")
+
+
+def settle_attempt(ctx, run, key, att):
+    """Fin d'une tentative, avant toute exploitation de son résultat : descendants arrêtés, cgroup vérifié, preuve. → problèmes."""
+    if not att.get("cgroup"):
+        att["settled"] = "non vérifiée (pas de cgroup)"
+        stop_evidence(ctx, run, {"kind": "attempt_end", "task": key, "attempt": att.get("n"), "state": "UNVERIFIED"})
+        return []
+    for _ in range(40):  # `_team` vient d'écrire son résultat : lui laisser finir sa sortie
+        if not pid_alive(att.get("pid")):
+            break
+        time.sleep(0.05)
+    rows, problems = stop_processes([(key, att)])
+    att["settled"] = "non résolue" if problems else "descendants arrêtés" if rows[0].get("before") else "vérifiée"
+    stop_evidence(ctx, run, {"kind": "attempt_end", "task": key, "attempt": att.get("n"), "state": "UNRESOLVED" if problems else "STOPPED", "attempts": rows})
+    return problems
+
+
+def run_tracked_agent(ctx, run, kind, key, acfg, pf, of, cwd, log, timeout):
+    """Agent au premier plan (débat, revue) : même scope et même arrêt que les équipes. Enregistré AVANT son lancement, donc
+    connu de l'arrêt critique et repris si ce manager meurt. → code, ou EXIT_CRITICAL via SystemExit si l'arrêt n'est pas prouvé."""
+    unit = None if acfg.get("adapter") in ("docker", "drop") or team_tracking_problem() else f"pmx-team-{secrets.token_hex(8)}.scope"
+    with ctx.lock():
+        st = ctx.load_run(run)
+        if (st.get("stop") or {}).get("started") != _STOP_AT_START:
+            die(f"arrêt critique survenu pendant `{kind}` : aucun nouvel agent", EXIT_CRITICAL)
+        if unit:
+            entry = {"kind": kind, "key": key, "n": len(st.get("helpers") or []) + 1, "unit": unit, "cgroup": f"{_SCOPE_PARENT}/{unit}",
+                     "owner": os.getpid(), "owner_start": proc_start(os.getpid()), "ended": None}
+            st.setdefault("helpers", []).append(entry)
+            ctx.save_run(st)
+    if not unit:
+        return run_agent_sync(ctx, acfg, pf, of, cwd, "read", log, timeout)
+    try:
+        return run_agent_sync(ctx, acfg, pf, of, cwd, "read", log, timeout, unit=unit)
+    finally:
+        settle_helpers(ctx, run, [unit])
+
+
+def settle_helpers(ctx, run, units=None):
+    """Arrête et vérifie les agents de premier plan désignés, ou ceux dont le manager est mort (`units` None)."""
+    with ctx.lock():
+        st = ctx.load_run(run)
+        todo = [h for h in st.get("helpers") or [] if not h["ended"] and (h["unit"] in units if units else proc_start(h["owner"]) != h["owner_start"])]
+        if not todo:
+            return
+        rows, problems = stop_processes([(f"{h['kind']}:{h['key']}", h) for h in todo])
+        for h in todo:
+            h["ended"] = now()
+        stop_evidence(ctx, run, {"kind": "helper_end", "state": "UNRESOLVED" if problems else "STOPPED", "problems": problems, "attempts": rows})
+        ctx.save_run(st)
+    if problems:
+        sys.exit(abort_all(ctx, run, "agent de débat ou de revue non arrêté : " + " ; ".join(problems)))
+
+
+# Équipe Claude sans shell, profil hybride confiné uniquement (temporaire). Chaque commande sandboxée fait créer par bubblewrap, sur l'hôte et
+# dans le worktree, des fichiers vides aux chemins protégés (.claude/settings.json, .mcp.json…), indiscernables pour le contrôle de
+# périmètre d'une écriture de l'agent. Sans commande : aucun artefact, garde-fou intact. Point unique de décision : le bloc `sandbox`
+# reste généré et les règles Bash des réglages restent en place. Rétablir le shell demande d'abord une preuve technique dans
+# scope_check, jamais une exception sur le nom, la taille ou le mode (voir docs/PILOT-HYBRID.md, « Évolution »).
+CONFINED_CLAUDE_TEAM_SHELL = False
+
+
+def confined_team_without_shell(ctx):
+    return ctx.o.get("mode") == HYBRID and confined(ctx) and not CONFINED_CLAUDE_TEAM_SHELL
+
+
 def codex_package_dir():
     """Répertoire d'installation de Codex, seul chemin du HOME lisible dans son sandbox (Codex s'y ré-exécute)."""
     exe = shutil.which("codex")
@@ -461,6 +712,8 @@ def claude_confined_settings(ctx, acfg, cwd, mode, dest):
         die(f"réglages {acfg.get('settings')} : bloc `sandbox` réservé à pmx en confinement natif", EXIT_USAGE)
     perms = dict(base.get("permissions") or {})
     perms["blockReadsOutsideWorkingDirectories"] = True
+    if confined_team_without_shell(ctx):  # défense en profondeur : aucun shell, même si une règle `allow` en autorise
+        perms["deny"] = [*(perms.get("deny") or []), "Bash"]
     w = str(pathlib.Path(cwd).resolve())
     base["permissions"] = perms
     base["sandbox"] = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
@@ -477,6 +730,8 @@ def confinement_problems(ctx):
         return []
     adapters = {c.get("adapter") for _w, c in agent_configs(ctx)}
     probs = [f"{t} absent (prérequis du sandbox natif)" for t in ("bwrap", "socat") if not shutil.which(t)]
+    if ctx.o.get("mode") == HYBRID and (why := team_tracking_problem()):
+        probs.append(f"suivi des tentatives par cgroup indisponible (arrêt critique invérifiable) : {why}")
     for who, c in agent_configs(ctx):
         if c.get("adapter") == "claude-cli" and c.get("settings"):
             try:
@@ -535,7 +790,7 @@ def require_confinement(ctx):
 AGENT_ENV_ALLOW = {"HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG", "LANGUAGE", "TERM", "TZ",
                    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
                    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE",
-                   "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "PYTHONDONTWRITEBYTECODE"}
+                   "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "PYTHONDONTWRITEBYTECODE", "DISABLE_AUTOUPDATER"}
 AGENT_ENV_DENY = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|CREDENTIAL|PRIVATE|AWS|AZURE|GITHUB|GITLAB|SSH_AUTH|OAUTH|COOKIE|SESSION", re.I)
 
 
@@ -549,6 +804,7 @@ def agent_env():
         if "proxy" in k.lower() and k.lower() != "no_proxy" and "@" in urllib.parse.urlsplit(v if "://" in v else "//" + v).netloc:
             continue  # proxy avec identifiants : jamais transmis à un agent
         env[k] = v
+    env["DISABLE_AUTOUPDATER"] = "1"  # un agent ne met jamais à jour l'installation globale de sa CLI pendant un run
     return env
 
 
@@ -570,7 +826,7 @@ def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):
             argv += ["-m", acfg["model"]]
         return argv + [prompt], False
     if a == "claude-cli":
-        tools = "Read,Grep,Glob" if mode == "read" else "Read,Grep,Glob,Edit,Write,Bash"
+        tools = "Read,Grep,Glob" if mode == "read" else "Read,Grep,Glob,Edit,Write" if confined_team_without_shell(ctx) else "Read,Grep,Glob,Edit,Write,Bash"
         argv = ["claude", "-p", prompt, "--output-format", "text", "--tools", tools,
                 "--permission-mode", "default" if mode == "read" else "acceptEdits"]
         if confined(ctx):  # réglages générés pour cet appel, hors du worktree, à côté du prompt
@@ -589,7 +845,7 @@ def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):
     die(f"adaptateur inconnu : {a!r}", EXIT_USAGE)
 
 
-def run_agent_sync(ctx, acfg, prompt_file, out_file, cwd, mode, log_file, timeout, name=None, gateway=None):
+def run_agent_sync(ctx, acfg, prompt_file, out_file, cwd, mode, log_file, timeout, name=None, gateway=None, unit=None):
     if acfg.get("adapter") == "docker":
         with open(log_file, "a", encoding="utf-8") as log:
             rc, _ev = run_docker_agent(ctx, acfg, prompt_file, out_file, cwd, mode, log, timeout,
@@ -603,16 +859,33 @@ def run_agent_sync(ctx, acfg, prompt_file, out_file, cwd, mode, log_file, timeou
         log.write(f"\n[{now()}] $ {' '.join(shlex.quote(x) for x in shown)}\n")
         log.flush()
         try:
-            p = subprocess.run(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, env=agent_env())
-        except subprocess.TimeoutExpired:
-            log.write(f"[{now()}] TIMEOUT {timeout}s\n")
-            return 124
+            env = agent_env()
+            if unit:  # systemd-run a besoin de XDG_RUNTIME_DIR ; l'agent, non
+                env["XDG_RUNTIME_DIR"] = os.environ.get("XDG_RUNTIME_DIR", "")
+                argv = [*team_scope_argv(unit), "env", "-u", "XDG_RUNTIME_DIR", *argv]
+            p = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         except FileNotFoundError as e:
             log.write(f"[{now()}] introuvable : {e}\n")
             return 127
-        log.write(p.stdout[-20000:] + "\n" + p.stderr[-20000:] + f"\n[{now()}] exit {p.returncode}\n")
+        try:
+            if unit:  # l'absence du cgroup vaut « vide » à l'arrêt : l'appartenance réelle est donc contrôlée dès le lancement
+                for _ in range(200):
+                    if (proc_cgroup(p.pid) or "").endswith("/" + unit) or p.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                else:
+                    log.write(f"[{now()}] scope {unit} non créé\n")
+                    return 125
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.write(f"[{now()}] TIMEOUT {timeout}s\n")
+            return 124
+        finally:
+            if p.poll() is None:
+                p.kill()
+        log.write(out[-20000:] + "\n" + err[-20000:] + f"\n[{now()}] exit {p.returncode}\n")
     if to_stdout:
-        write_atomic(pathlib.Path(out_file), p.stdout)
+        write_atomic(pathlib.Path(out_file), out)
     return p.returncode
 
 
@@ -1255,7 +1528,7 @@ def _debate_advance(ctx, run):
         write_atomic(pf, debate_prompt(ctx, st, side))
         st["debate"]["status"] = "running"
         ctx.event(run, "debate_turn_requested", n=n, side=side, adapter=acfg.get("adapter"))
-        rc = run_agent_sync(ctx, acfg, pf, of, ctx.root, "read", d / "agents.log", ctx.o["team_timeout_s"])
+        rc = run_tracked_agent(ctx, run, "debate", f"tour-{n}", acfg, pf, of, ctx.root, d / "agents.log", ctx.o["team_timeout_s"])
         if rc is None:
             print(f"EN ATTENTE — tour {n} ({side}, agent externe en lecture seule)\n  prompt : {pf}\n  réponse : écrire le texte VERBATIM dans un fichier puis\n"
                   f"  pmx.py --root {ctx.root} debate submit --run {run} --side {side} --file <fichier>")
@@ -1488,7 +1761,7 @@ def print_plan(ctx, plan, waves):
 def changed_paths(wt, base):
     """Chemins modifiés dans un worktree par rapport à `base` (commités, indexés, non suivis) + suppressions."""
     out, deleted = set(), set()
-    for line in git(wt, "status", "--porcelain=v1", "-uall", "--no-renames").splitlines():
+    for line in git(wt, "status", "--porcelain=v1", "-uall", "--no-renames", strip=False).splitlines():
         code, path = line[:2], line[3:]
         out.add(path)
         if "D" in code:
@@ -1568,6 +1841,12 @@ def team_brief(ctx, st, key, attempt, wt, report):
         where = f"Écris ton rapport dans `{report}` (hors worktree ; seul fichier extérieur autorisé)"
     else:  # Codex/claude -p : la sortie est capturée par l'orchestrateur ; écrire hors du worktree est impossible (sandbox)
         where = "Ton DERNIER MESSAGE est ton rapport (l'orchestrateur le capture) ; n'écris aucun fichier de rapport, ni dans ni hors du worktree"
+    if confined_team_without_shell(ctx) and ctx.o["teams"][t["team"]].get("adapter") == "claude-cli":
+        verify_lines = (f"- Tu n'as **aucun outil shell** : n'exécute aucun test. Le verdict officiel vient de `pmx verify`, dans un conteneur Docker, avec : `{t['test_command']}`.\n"
+                        "- Cette consigne remplace, pour ce brief, celle du rôle `developer` sur le lancement des tests.\n"
+                        "- Écris le code et les tests avec tes outils de fichiers. Ne te déclare pas BLOCKED pour ce seul motif : dans Evidence, indique « tests non exécutés par l'agent ; vérification centralisée ».")
+    else:
+        verify_lines = f"- Commande : `{t['test_command']}` (depuis la racine du worktree) — colle la sortie dans ton rapport."
     role = load_role(ctx, "developer")
     plan = json.loads((ctx.run_dir(st["run"]) / "plan.json").read_text(encoding="utf-8"))
     spec = next(x for x in plan["tasks"] if x["key"] == key)
@@ -1593,7 +1872,7 @@ Tout autre fichier modifié, toute suppression, tout chemin sensible (secrets, `
 l'orchestrateur arrête les DEUX équipes. Besoin d'un autre fichier → n'y touche pas, signale-le dans ton rapport (BLOCKED).
 
 ## Vérification attendue
-- Commande : `{t['test_command']}` (depuis la racine du worktree) — colle la sortie dans ton rapport.
+{verify_lines}
 
 ## Interdits (en plus du rôle)
 - aucun `git commit`, `git push`, `git stash`, `git checkout` d'une autre branche, aucune MR : l'orchestrateur commite après contrôle du périmètre ;
@@ -1672,10 +1951,21 @@ def dispatch_ready(ctx, run):
                 waiting.append((key, brief, report))
             else:
                 log = open(tdir / f"team-a{n}.log", "a")
-                p = subprocess.Popen([sys.executable, "-I", str(pathlib.Path(__file__).resolve()), "--root", str(ctx.root), "_team",
+                unit = None if team_tracking_problem() else f"pmx-team-{secrets.token_hex(8)}.scope"
+                p = subprocess.Popen([*(team_scope_argv(unit) if unit else []), sys.executable, "-I", str(pathlib.Path(__file__).resolve()), "--root", str(ctx.root), "_team",
                                       "--run", run, "--task", key, "--attempt", str(n)],
                                      stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env_team)
                 att["pid"] = p.pid
+                if unit:  # `_team` attend ce verrou : si le scope échoue, aucun agent n'a démarré
+                    for _ in range(200):
+                        if (rel := proc_cgroup(p.pid) or "").endswith("/" + unit) or p.poll() is not None:
+                            break
+                        time.sleep(0.05)
+                    if not rel.endswith("/" + unit):
+                        p.kill()
+                        die(f"{key} : scope {unit} non créé — aucun agent lancé", EXIT_FAIL)
+                    att["unit"], att["cgroup"] = unit, rel
+                att["pid_start"] = proc_start(p.pid)
             t["attempts"].append(att)
             wi_set(ctx, t["wi"], status="IN_PROGRESS", session=f"{t['team']} ({att['adapter']}, pid {att['pid'] or 'externe'})",
                    worktree=str(wt), attempt_count=len(t["attempts"]) - 1)
@@ -1744,52 +2034,93 @@ def cmd_report(ctx, a):
 
 
 def abort_all(ctx, run, reason):
-    """Échec critique : arrête toutes les équipes, passe leurs WI en BLOCKED. Rien n'est supprimé (worktrees gardés comme preuve)."""
+    """Échec critique : arrête toutes les équipes, passe leurs WI en BLOCKED. Rien n'est supprimé (worktrees gardés comme preuve).
+    L'état bloquant est écrit avant tout signal : un manager interrompu laisse `stop.state = IN_PROGRESS`, et le passage suivant reprend."""
     lk = ctx.lock()
     st = ctx.load_run(run)
-    stopped = []
+    stopped = list(st["stop"]["tasks"]) if stop_unresolved(st) else []
     for key, t in st["tasks"].items():
         if wi_status(ctx, t["wi"]) != "IN_PROGRESS":
             continue
         att = t["attempts"][-1]
         if att.get("container"):  # le conteneur appartient au démon : tuer le client docker ne l'arrête pas
             docker_stop(ctx, att["container"])
-        if att.get("pid") and pid_alive(att["pid"]):
-            try:
-                os.killpg(att["pid"], signal.SIGTERM)
-            except ProcessLookupError:
-                pass
         write_atomic(ctx.run_dir(run) / "tasks" / key / "STOP", f"{now()} {reason}\n")
         att.update(ended=now(), result="aborted")
         wi_set(ctx, t["wi"], status="BLOCKED", blocker=f"critical stop: {reason}", restore_state="OPEN")
         stopped.append(key)
-    time.sleep(1)
-    for t in st["tasks"].values():
-        pid = t["attempts"][-1].get("pid") if t["attempts"] else None
-        if pid and pid_alive(pid):
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+    ack = st["stop"].get("ack") if stop_unresolved(st) else None
+    st["stop"] = {"state": "IN_PROGRESS", "reason": reason, "tasks": stopped, "started": now(), **({"ack": ack} if ack else {})}
+    ctx.save_run(st)
+    ctx.event(run, "critical_stop_begin", reason=reason, stopped=stopped)
+    # toute tentative suivie (un descendant peut survivre à une tentative terminée) ; sans cgroup, seules celles qu'on arrête
+    targets = [(k, a) for k, t in st["tasks"].items() for a in t["attempts"] if a.get("adapter") != "drop"
+               and (a.get("cgroup") or a.get("unit") or (k in stopped and a is t["attempts"][-1] and a.get("pid")))]
+    helpers = [h for h in st.get("helpers") or [] if not h["ended"]]
+    rows, problems = stop_processes(targets + [(f"{h['kind']}:{h['key']}", h) for h in helpers])
+    for h in helpers:
+        h["ended"] = now()
     for key in stopped:  # preuve de chaque conteneur arrêté (état, configuration), puis suppression du seul conteneur pmx
         if (c := st["tasks"][key]["attempts"][-1].get("container")):
             docker_finalize(ctx, c, ctx.run_dir(run) / "tasks" / key)
+            if docker_own(ctx, c):
+                problems.append(f"{key} : conteneur {c} toujours présent")
         if (gw := st["tasks"][key]["attempts"][-1].get("gateway")):
             gateway_detach_team(ctx, run, gw)
     gateway_reap(ctx, run, st)
+    drops = [k for k in stopped if st["tasks"][k]["attempts"][-1]["adapter"] == "drop"]
+    problems += [f"{k} : équipe externe, arrêt non vérifiable par pmx" for k in drops]
+    st["stop"].update(state="UNRESOLVED" if problems else "STOPPED", problems=problems, ended=now())
+    stop_evidence(ctx, run, {"kind": "critical_stop", **st["stop"], "attempts": rows})
     ctx.save_run(st)
     lk.close()
-    ctx.event(run, "critical_abort", reason=reason, stopped=stopped)
-    print(f"⛔ ÉCHEC CRITIQUE — équipes arrêtées : {stopped or 'aucune en cours'} — {reason}")
-    drops = [k for k in stopped if st["tasks"][k]["attempts"][-1]["adapter"] == "drop"]
+    ctx.event(run, "critical_abort", reason=reason, stopped=stopped, verdict=st["stop"]["state"], problems=problems)
+    if problems:
+        print(f"⛔ ÉCHEC CRITIQUE — ARRÊT NON RÉSOLU {stopped or ''} — {reason}\n   " + "\n   ".join(problems)
+              + f"\n   aucune équipe ne repart, aucune intégration : {STOP_RECOVERY}")
+    else:
+        print(f"⛔ ÉCHEC CRITIQUE — équipes arrêtées : {stopped or 'aucune en cours'} — arrêt vérifié — {reason}")
     if drops:
         print(f"   équipes externes {drops} : la session lead doit arrêter le sous-agent correspondant (fichier STOP écrit).")
     return EXIT_CRITICAL
 
 
+def cmd_stop_ack(ctx, a):
+    """Acquittement administratif d'un arrêt non résolu : consigne qui a pris connaissance de l'incident. Le verdict technique reste
+    inchangé et rien n'est débloqué."""
+    if not a.by.startswith("human:"):
+        die("--by human:<nom> requis", EXIT_USAGE)
+    tty, why = open_human_tty()
+    if tty is None:
+        die(f"acquittement refusé — {why}", EXIT_HUMAN)
+    st = ctx.load_run(a.run)
+    if not stop_unresolved(st):
+        os.close(tty)
+        print("aucun arrêt non résolu")
+        return EXIT_OK
+    alive = [x.get("unit") for t in st["tasks"].values() for x in [*t["attempts"]] if attempt_cgroup(x) and cgroup_populated(attempt_cgroup(x)) is True]
+    alive += [h["unit"] for h in st.get("helpers") or [] if attempt_cgroup(h) and cgroup_populated(attempt_cgroup(h)) is True]
+    expected = f"lever {a.run}"
+    os.write(tty, f"\nArrêt non résolu : {st['stop'].get('problems')}\nCgroups encore actifs : {alive or 'aucun vu'}\nCet acquittement ne débloque rien. Pour le consigner, tapez exactement : {expected}\n> ".encode("utf-8"))
+    answer = read_line(tty).strip()
+    os.close(tty)
+    if answer != expected:
+        print("✘ confirmation absente ou incorrecte — rien consigné")
+        return EXIT_HUMAN
+    with ctx.lock():
+        st = ctx.load_run(a.run)
+        st["stop"]["ack"] = {"by": a.by, "ts": now(), "alive_seen": alive}
+        ctx.save_run(st)
+    ctx.event(a.run, "critical_stop_acknowledged", by=a.by, alive_seen=alive, verdict=st["stop"]["state"])
+    print(f"incident acquitté par {a.by} — verdict technique inchangé : {st['stop']['state']}\n{STOP_RECOVERY}")
+    return EXIT_OK
+
+
 def cmd_tick(ctx, a):
     """Un passage de surveillance : périmètre, collisions inter-équipes, fins de processus, interruptions, tentatives."""
     st = ctx.load_run(a.run)
+    if stop_unresolved(st):
+        return abort_all(ctx, a.run, st["stop"]["reason"])
     seen, critical = {}, []
     with ctx.lock():
         st = ctx.load_run(a.run)
@@ -1808,6 +2139,7 @@ def cmd_tick(ctx, a):
     if critical:
         return abort_all(ctx, a.run, " | ".join(critical))
     rc_out = EXIT_OK
+    unsettled = []
     with ctx.lock():
         st = ctx.load_run(a.run)
         for key, t in st["tasks"].items():
@@ -1815,6 +2147,10 @@ def cmd_tick(ctx, a):
                 continue
             att = t["attempts"][-1]
             resf = ctx.run_dir(a.run) / "tasks" / key / f"result-a{att['n']}.json"
+            ended = resf.exists() or (att["adapter"] != "drop" and not pid_alive(att["pid"]))
+            if ended and (bad := settle_attempt(ctx, a.run, key, att)):
+                unsettled += bad
+                continue
             if resf.exists():
                 res = json.loads(resf.read_text(encoding="utf-8"))
                 _finish_attempt(ctx, st, key, res)
@@ -1826,6 +2162,8 @@ def cmd_tick(ctx, a):
                 _finish_attempt(ctx, st, key, {"exit": None, "ended": now(), "interrupted": True})
         ctx.save_run(st)
         gateway_reap(ctx, a.run, st)
+    if unsettled:
+        return abort_all(ctx, a.run, "fin de tentative sans arrêt prouvé : " + " ; ".join(unsettled))
     return rc_out
 
 
@@ -2091,7 +2429,7 @@ def run_checks(ctx, wt, commands, timeout, evidence_dir, label):
 
 def repo_snapshot(ctx):
     """Références et état du checkout principal : les commandes de test ne doivent modifier ni l'un ni l'autre."""
-    main = [l for l in git(ctx.root, "status", "--porcelain=v1", "-uall").splitlines() if not l[3:].startswith(("ai_memory/runs/", "ai_memory/.pmx.lock"))]
+    main = [l for l in git(ctx.root, "status", "--porcelain=v1", "-uall", strip=False).splitlines() if not l[3:].startswith(("ai_memory/runs/", "ai_memory/.pmx.lock"))]
     return {"refs": git(ctx.root, "for-each-ref", "--format=%(refname) %(objectname)").splitlines(), "main": main}
 
 
@@ -2231,7 +2569,7 @@ def cmd_review(ctx, a):
         write_atomic(pf, REVIEW_PROMPT.format(root=ctx.root, checkout=cdir, test=t["test_command"], wi=t["wi"], title=t["title"], team=t["team"], decision=st["decision"]["text"],
                                               acceptance=json.dumps(t["acceptance"], ensure_ascii=False), files=t["files"], commit=t["commit"][:10], diff=diff))
         ctx.event(a.run, "review_requested", task=key, reviewer=reviewer, adapter=acfg.get("adapter"))
-        rc = run_agent_sync(ctx, acfg, pf, of, cdir, "read", rdir / "agents.log", ctx.o["team_timeout_s"])
+        rc = run_tracked_agent(ctx, a.run, "review", key, acfg, pf, of, cdir, rdir / "agents.log", ctx.o["team_timeout_s"])
         if rc is None:
             waiting.append((key, reviewer, pf))
             continue
@@ -2448,6 +2786,14 @@ def cmd_status(ctx, a):
         deps = ", ".join(f"{d}:{wi_status(ctx, st['tasks'][d]['wi'])}" for d in t["depends_on"]) or "—"
         proof = f"commit {t['commit'][:10]} tree {t['tree'][:10]}" if t.get("commit") else "aucune"
         print(f"| {t['wi']} | {k} | {w.get('status')} | {deps} | {proof} | {(t.get('verify') or {}).get('verdict', '—')} | {(t.get('review') or {}).get('verdict', '—')} | {w.get('blocker', '—')} | {nxt.get(w.get('status'), '?')} |")
+    if st.get("stop"):
+        print(f"\nArrêt critique — verdict technique : {st['stop']['state']} — {st['stop'].get('reason')}" + "".join(f"\n  ✘ {x}" for x in st["stop"].get("problems") or []))
+        if st["stop"].get("ack"):
+            print(f"Acquittement administratif (ne prouve rien, ne débloque rien) : {st['stop']['ack']['by']}, {st['stop']['ack']['ts']}")
+        if stop_unresolved(st):
+            print(STOP_RECOVERY)
+    if (unv := [k for k, t in st["tasks"].items() for x in t["attempts"] if (x.get("settled") or "").startswith("non vérifiée")]):
+        print(f"\nFins de tentative non vérifiées (pas de cgroup) : {unv}")
     print("\n### Orchestration technique (exécution des équipes)")
     print("| Tâche | Équipe | Branche | Worktree (git worktree list) | Activité (observation datée) | Tentatives |\n|---|---|---|---|---|---|")
     for k, t in st["tasks"].items():
@@ -2577,6 +2923,7 @@ def main(argv=None):
     p = sp.add_parser("abort"); p.add_argument("--run", required=True); p.add_argument("--reason")
     p = sp.add_parser("reopen"); p.add_argument("--run", required=True); p.add_argument("--task", required=True)
     p.add_argument("--by", required=True); p.add_argument("--reason", required=True)
+    p = sp.add_parser("stop-ack"); p.add_argument("--run", required=True); p.add_argument("--by", required=True)
     p = sp.add_parser("_team"); p.add_argument("--run", required=True); p.add_argument("--task", required=True); p.add_argument("--attempt", required=True)
     a = ap.parse_args(argv)
     ctx = Ctx(a.root)
@@ -2588,7 +2935,14 @@ def main(argv=None):
         die("review submit --task … --file …", EXIT_USAGE)
     fn = {"doctor": cmd_doctor, "start": cmd_start, "debate": cmd_debate, "decide": cmd_decide, "plan": cmd_plan, "dispatch": cmd_dispatch,
           "tick": cmd_tick, "wait": cmd_wait, "report": cmd_report, "verify": cmd_verify, "review": cmd_review, "integrate": cmd_integrate,
-          "status": cmd_status, "evidence": cmd_evidence, "resume": cmd_resume, "abort": cmd_abort, "reopen": cmd_reopen, "_team": cmd_team}[a.cmd]
+          "status": cmd_status, "evidence": cmd_evidence, "resume": cmd_resume, "abort": cmd_abort, "reopen": cmd_reopen, "stop-ack": cmd_stop_ack, "_team": cmd_team}[a.cmd]
+    if a.cmd in ("dispatch", "tick", "wait", "resume", "report", "verify", "review", "integrate", "reopen", "debate") and getattr(a, "action", None) != "show":
+        settle_helpers(ctx, a.run)  # agents de débat ou de revue dont le manager est mort
+        global _STOP_AT_START
+        st = ctx.load_run(a.run)
+        _STOP_AT_START = (st.get("stop") or {}).get("started")
+        if stop_unresolved(st) and a.cmd not in ("tick", "wait", "resume", "report"):
+            die(f"arrêt critique non résolu : aucune équipe, aucune intégration ; {STOP_RECOVERY}", EXIT_CRITICAL)
     return fn(ctx, a)
 
 

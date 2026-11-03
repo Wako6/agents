@@ -78,7 +78,7 @@ class Pilot(unittest.TestCase):
                 if not chunk:
                     break
                 out += chunk
-            m = re.search(rb"tapez exactement : (integrer [0-9a-f]+)", out)
+            m = re.search(rb"tapez exactement : (integrer [0-9a-f]+|lever \S+)", out)
             if m and not sent:
                 os.write(fd, (answer if answer is not None else m.group(1).decode()).encode() + b"\n")
                 sent = True
