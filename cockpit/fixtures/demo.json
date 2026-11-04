@@ -1,0 +1,829 @@
+{
+ "_comment": "Données entièrement fictives pour le prototype du cockpit.",
+ "projects": [
+  {
+   "id": "demo-calculatrice",
+   "name": "Calculatrice (démo)",
+   "backend": "ledger",
+   "mode": "hybride",
+   "profile": "pilote-non-sensible",
+   "profile_active": false,
+   "source": "OK",
+   "runs": [
+    {
+     "id": "WI-DEMO-001",
+     "title": "Ajouter multiply et divide",
+     "parent_wi": "WI-DEMO-001",
+     "created": "T-5400",
+     "updated": "T-20",
+     "observed_at": "T-3",
+     "source": "OK",
+     "base": "a1b2c3d",
+     "pipeline": [
+      {
+       "key": "request",
+       "label": "Demande",
+       "state": "done",
+       "detail": ""
+      },
+      {
+       "key": "debate",
+       "label": "Débat",
+       "state": "done",
+       "detail": "Consensus en 3 tours"
+      },
+      {
+       "key": "decision",
+       "label": "Décision",
+       "state": "done",
+       "detail": "Humain"
+      },
+      {
+       "key": "plan",
+       "label": "Plan",
+       "state": "done",
+       "detail": "Approuvé"
+      },
+      {
+       "key": "teams",
+       "label": "Équipes",
+       "state": "active",
+       "detail": "2 équipes en parallèle"
+      },
+      {
+       "key": "verify",
+       "label": "Vérification Docker",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "review",
+       "label": "Revue croisée",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "dry",
+       "label": "Intégration à blanc",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "integrate",
+       "label": "Intégration",
+       "state": "pending",
+       "detail": ""
+      }
+     ],
+     "teams": [
+      {
+       "name": "team-claude",
+       "adapter": "claude-cli",
+       "role": "développement",
+       "task": "multiply",
+       "cgroup": "pmx-team-11aa22bb",
+       "processes": 3,
+       "observed_at": "T-3"
+      },
+      {
+       "name": "team-codex",
+       "adapter": "codex-cli",
+       "role": "développement",
+       "task": "divide",
+       "cgroup": "pmx-team-33cc44dd",
+       "processes": 8,
+       "observed_at": "T-3"
+      }
+     ],
+     "tasks": [
+      {
+       "key": "multiply",
+       "wi": "WI-DEMO-002",
+       "title": "multiply(a, b) et ses tests",
+       "team": "team-claude",
+       "status": "IN_PROGRESS",
+       "files": [
+        "src/multiply.py",
+        "test/test_multiply.py"
+       ],
+       "depends_on": [],
+       "budget": "Tentative 1 sur 1",
+       "attempts": [
+        {
+         "n": 1,
+         "adapter": "claude-cli",
+         "branch": "pilot/demo/multiply",
+         "worktree": "multiply-a1",
+         "started": "T-30",
+         "ended": null,
+         "result": "running",
+         "liveness": "OBSERVED_ALIVE",
+         "observed_at": "T-3",
+         "settled": null,
+         "cgroup": "pmx-team-11aa22bb"
+        }
+       ]
+      },
+      {
+       "key": "divide",
+       "wi": "WI-DEMO-003",
+       "title": "divide(a, b), division par zéro comprise",
+       "team": "team-codex",
+       "status": "IN_PROGRESS",
+       "files": [
+        "src/divide.py",
+        "test/test_divide.py"
+       ],
+       "depends_on": [],
+       "budget": "Tentative 1 sur 1",
+       "attempts": [
+        {
+         "n": 1,
+         "adapter": "codex-cli",
+         "branch": "pilot/demo/divide",
+         "worktree": "divide-a1",
+         "started": "T-30",
+         "ended": null,
+         "result": "running",
+         "liveness": "OBSERVED_ALIVE",
+         "observed_at": "T-3",
+         "settled": null,
+         "cgroup": "pmx-team-33cc44dd"
+        }
+       ]
+      }
+     ],
+     "decisions": [
+      {
+       "ts": "T-3600",
+       "kind": "Décision",
+       "by": "human:demo",
+       "text": "Deux fonctions pures, sans toucher à calculator."
+      },
+      {
+       "ts": "T-3000",
+       "kind": "Plan approuvé",
+       "by": "demo",
+       "text": "Deux tâches parallèles, une tentative chacune."
+      }
+     ],
+     "security": {
+      "items": [
+       {
+        "label": "Mode",
+        "value": "Hybride, vérification Docker",
+        "proof": "DECLARED",
+        "note": "Lu dans la configuration du projet."
+       },
+       {
+        "label": "Confinement natif",
+        "value": "Actif",
+        "proof": "DECLARED",
+        "note": "Fictif : aucune sonde réelle dans ce prototype."
+       },
+       {
+        "label": "Restriction MCP, Claude",
+        "value": "--strict-mcp-config, configuration vide",
+        "proof": "DECLARED",
+        "note": "Validée sur les surfaces testées, sans garantie d'isolation complète."
+       },
+       {
+        "label": "Connecteurs Codex (apps)",
+        "value": "Coupés par option",
+        "proof": "NOT_MEASURED",
+        "note": "Effet non mesuré avec un connecteur réellement actif."
+       },
+       {
+        "label": "Hooks Codex",
+        "value": "Coupés par option",
+        "proof": "NOT_MEASURED",
+        "note": "Non testé avec un hook réel."
+       },
+       {
+        "label": "Sous-agents",
+        "value": "Héritage des restrictions",
+        "proof": "NOT_MEASURED",
+        "note": "Non mesuré."
+       },
+       {
+        "label": "Fichiers sensibles",
+        "value": "Aucune violation",
+        "proof": "OBSERVED",
+        "note": "Contrôle de périmètre du run."
+       }
+      ]
+     },
+     "events": [
+      {
+       "ts": "T-3000",
+       "kind": "plan_approved",
+       "severity": "info",
+       "text": "Plan approuvé par demo"
+      },
+      {
+       "ts": "T-30",
+       "kind": "team_started",
+       "task": "multiply",
+       "severity": "info",
+       "text": "multiply lancée (team-claude)"
+      },
+      {
+       "ts": "T-30",
+       "kind": "team_started",
+       "task": "divide",
+       "severity": "info",
+       "text": "divide lancée (team-codex)"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "demo-facturation",
+   "name": "Facturation (démo)",
+   "backend": "ledger",
+   "mode": "hybride",
+   "profile": "pro-standard",
+   "profile_active": false,
+   "source": "OK",
+   "runs": [
+    {
+     "id": "WI-DEMO-010",
+     "title": "Export des factures",
+     "parent_wi": "WI-DEMO-010",
+     "created": "T-90000",
+     "updated": "T-1800",
+     "observed_at": "T-5",
+     "source": "OK",
+     "base": "d4e5f60",
+     "pipeline": [
+      {
+       "key": "request",
+       "label": "Demande",
+       "state": "done",
+       "detail": ""
+      },
+      {
+       "key": "debate",
+       "label": "Débat",
+       "state": "done",
+       "detail": ""
+      },
+      {
+       "key": "decision",
+       "label": "Décision",
+       "state": "done",
+       "detail": ""
+      },
+      {
+       "key": "plan",
+       "label": "Plan",
+       "state": "done",
+       "detail": ""
+      },
+      {
+       "key": "teams",
+       "label": "Équipes",
+       "state": "blocked",
+       "detail": "Arrêt critique non prouvé"
+      },
+      {
+       "key": "verify",
+       "label": "Vérification Docker",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "review",
+       "label": "Revue croisée",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "dry",
+       "label": "Intégration à blanc",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "integrate",
+       "label": "Intégration",
+       "state": "pending",
+       "detail": ""
+      }
+     ],
+     "teams": [
+      {
+       "name": "team-claude",
+       "adapter": "claude-cli",
+       "role": "développement",
+       "task": "export",
+       "cgroup": "pmx-team-55ee66ff",
+       "processes": 1,
+       "observed_at": "T-5"
+      }
+     ],
+     "tasks": [
+      {
+       "key": "export",
+       "wi": "WI-DEMO-011",
+       "title": "Export CSV des factures",
+       "team": "team-claude",
+       "status": "BLOCKED",
+       "files": [
+        "src/export.py"
+       ],
+       "depends_on": [],
+       "budget": "Tentative 1 sur 1",
+       "blocker": "critical stop: .env : chemin sensible (secret)",
+       "attempts": [
+        {
+         "n": 1,
+         "adapter": "claude-cli",
+         "branch": "pilot/demo/export",
+         "worktree": "export-a1",
+         "started": "T-2400",
+         "ended": "T-1800",
+         "result": "aborted",
+         "liveness": "OBSERVED_ALIVE",
+         "observed_at": "T-5",
+         "settled": "non résolue",
+         "cgroup": "pmx-team-55ee66ff"
+        }
+       ]
+      }
+     ],
+     "decisions": [
+      {
+       "ts": "T-1700",
+       "kind": "Acquittement administratif",
+       "by": "human:demo",
+       "text": "Incident consigné. Le verdict technique reste UNRESOLVED."
+      }
+     ],
+     "security": {
+      "stop": {
+       "state": "UNRESOLVED",
+       "reason": "export : .env : chemin sensible (secret)",
+       "ack_by": "human:demo"
+      },
+      "items": [
+       {
+        "label": "Mode",
+        "value": "Hybride, vérification Docker",
+        "proof": "DECLARED",
+        "note": "Lu dans la configuration du projet."
+       },
+       {
+        "label": "Confinement natif",
+        "value": "Actif",
+        "proof": "DECLARED",
+        "note": "Fictif : aucune sonde réelle dans ce prototype."
+       },
+       {
+        "label": "Restriction MCP, Claude",
+        "value": "--strict-mcp-config, configuration vide",
+        "proof": "DECLARED",
+        "note": "Validée sur les surfaces testées, sans garantie d'isolation complète."
+       },
+       {
+        "label": "Connecteurs Codex (apps)",
+        "value": "Coupés par option",
+        "proof": "NOT_MEASURED",
+        "note": "Effet non mesuré avec un connecteur réellement actif."
+       },
+       {
+        "label": "Hooks Codex",
+        "value": "Coupés par option",
+        "proof": "NOT_MEASURED",
+        "note": "Non testé avec un hook réel."
+       },
+       {
+        "label": "Sous-agents",
+        "value": "Héritage des restrictions",
+        "proof": "NOT_MEASURED",
+        "note": "Non mesuré."
+       },
+       {
+        "label": "Fichiers sensibles",
+        "value": "Violation : .env",
+        "proof": "OBSERVED",
+        "note": "Arrêt critique déclenché."
+       },
+       {
+        "label": "Processus du cgroup",
+        "value": "1 encore actif après SIGKILL",
+        "proof": "OBSERVED",
+        "note": "Récupération manuelle requise."
+       }
+      ]
+     },
+     "events": [
+      {
+       "ts": "T-1800",
+       "kind": "critical_abort",
+       "task": "export",
+       "severity": "critical",
+       "text": "Arrêt critique : .env, chemin sensible"
+      },
+      {
+       "ts": "T-1700",
+       "kind": "critical_stop_acknowledged",
+       "severity": "warning",
+       "text": "Acquitté par human:demo, verdict inchangé"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "demo-notes",
+   "name": "Notes (démo)",
+   "backend": "ledger",
+   "mode": "inconnu",
+   "profile": null,
+   "profile_active": false,
+   "source": "PARTIAL",
+   "runs": [
+    {
+     "id": "WI-DEMO-020",
+     "title": "<img src=x onerror=alert(1)> Titre hostile, à afficher comme du texte",
+     "parent_wi": "WI-DEMO-020",
+     "created": "T-200000",
+     "updated": "T-90000",
+     "observed_at": "T-90000",
+     "source": "PARTIAL",
+     "source_note": "dernière ligne de events.jsonl incomplète, ignorée.",
+     "base": "inconnu",
+     "pipeline": [
+      {
+       "key": "request",
+       "label": "Demande",
+       "state": "done",
+       "detail": ""
+      },
+      {
+       "key": "debate",
+       "label": "Débat",
+       "state": "done",
+       "detail": ""
+      },
+      {
+       "key": "decision",
+       "label": "Décision",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "plan",
+       "label": "Plan",
+       "state": "etat_futur_inconnu",
+       "detail": "Valeur non reconnue par ce cockpit"
+      },
+      {
+       "key": "teams",
+       "label": "Équipes",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "verify",
+       "label": "Vérification Docker",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "review",
+       "label": "Revue croisée",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "dry",
+       "label": "Intégration à blanc",
+       "state": "pending",
+       "detail": ""
+      },
+      {
+       "key": "integrate",
+       "label": "Intégration",
+       "state": "pending",
+       "detail": ""
+      }
+     ],
+     "teams": [
+      {
+       "name": "team-codex",
+       "adapter": "codex-cli",
+       "role": "revue",
+       "task": "tags",
+       "cgroup": null,
+       "processes": null,
+       "observed_at": null
+      }
+     ],
+     "tasks": [
+      {
+       "key": "tags",
+       "wi": "WI-DEMO-021",
+       "title": "Étiquettes de notes",
+       "team": "team-codex",
+       "status": "ETAT_FUTUR",
+       "files": [
+        "src/tags.py"
+       ],
+       "depends_on": [],
+       "attempts": [
+        {
+         "n": 1,
+         "adapter": "codex-cli",
+         "branch": "pilot/demo/tags",
+         "worktree": "tags-a1",
+         "started": "T-91000",
+         "ended": null,
+         "result": null,
+         "liveness": null,
+         "observed_at": null,
+         "settled": "non vérifiée (pas de cgroup)",
+         "cgroup": null
+        }
+       ]
+      }
+     ],
+     "decisions": [],
+     "security": {
+      "items": [
+       {
+        "label": "Mode",
+        "value": "Inconnu",
+        "proof": "NOT_MEASURED",
+        "note": "Configuration illisible."
+       }
+      ]
+     },
+     "events": [
+      {
+       "ts": "T-90000",
+       "kind": "team_started",
+       "task": "tags",
+       "severity": "info",
+       "text": "tags lancée (team-codex)"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "timeline": [
+  {
+   "run": "WI-DEMO-001",
+   "set": [],
+   "event": {
+    "kind": "team_process_begin",
+    "task": "multiply",
+    "severity": "info",
+    "text": "Processus multiply actif"
+   }
+  },
+  {
+   "run": "WI-DEMO-001",
+   "set": [],
+   "event": {
+    "kind": "team_process_begin",
+    "task": "divide",
+    "severity": "info",
+    "text": "Processus divide actif"
+   }
+  },
+  {
+   "run": "WI-DEMO-001",
+   "set": [
+    [
+     [
+      "tasks",
+      "multiply",
+      "status"
+     ],
+     "READY_FOR_VERIFICATION"
+    ],
+    [
+     [
+      "tasks",
+      "multiply",
+      "commit"
+     ],
+     "4f1c9ab"
+    ],
+    [
+     [
+      "tasks",
+      "multiply",
+      "blocker"
+     ],
+     null
+    ]
+   ],
+   "event": {
+    "kind": "team_finished",
+    "task": "multiply",
+    "severity": "info",
+    "text": "multiply terminée, commit 4f1c9ab, cgroup vide"
+   }
+  },
+  {
+   "run": "WI-DEMO-001",
+   "set": [
+    [
+     [
+      "tasks",
+      "divide",
+      "status"
+     ],
+     "READY_FOR_VERIFICATION"
+    ],
+    [
+     [
+      "tasks",
+      "divide",
+      "commit"
+     ],
+     "8b27de0"
+    ],
+    [
+     [
+      "pipeline",
+      "teams",
+      "state"
+     ],
+     "done"
+    ],
+    [
+     [
+      "pipeline",
+      "verify",
+      "state"
+     ],
+     "active"
+    ]
+   ],
+   "event": {
+    "kind": "team_finished",
+    "task": "divide",
+    "severity": "info",
+    "text": "divide terminée, commit 8b27de0, cgroup vide"
+   }
+  },
+  {
+   "run": "WI-DEMO-001",
+   "set": [
+    [
+     [
+      "tasks",
+      "multiply",
+      "verify"
+     ],
+     {
+      "verdict": "PASS",
+      "commit": "4f1c9ab",
+      "runner": "docker",
+      "tests": 5,
+      "failed": 0,
+      "ts": "NOW"
+     }
+    ],
+    [
+     [
+      "tasks",
+      "multiply",
+      "status"
+     ],
+     "READY_FOR_REVIEW"
+    ]
+   ],
+   "event": {
+    "kind": "verified",
+    "task": "multiply",
+    "severity": "info",
+    "text": "multiply : PASS en conteneur"
+   }
+  },
+  {
+   "run": "WI-DEMO-001",
+   "set": [
+    [
+     [
+      "tasks",
+      "divide",
+      "verify"
+     ],
+     {
+      "verdict": "PASS",
+      "commit": "8b27de0",
+      "runner": "docker",
+      "tests": 7,
+      "failed": 0,
+      "ts": "NOW"
+     }
+    ],
+    [
+     [
+      "tasks",
+      "divide",
+      "status"
+     ],
+     "READY_FOR_REVIEW"
+    ],
+    [
+     [
+      "pipeline",
+      "verify",
+      "state"
+     ],
+     "done"
+    ],
+    [
+     [
+      "pipeline",
+      "review",
+      "state"
+     ],
+     "active"
+    ]
+   ],
+   "event": {
+    "kind": "verified",
+    "task": "divide",
+    "severity": "info",
+    "text": "divide : PASS en conteneur"
+   }
+  },
+  {
+   "run": "WI-DEMO-001",
+   "set": [
+    [
+     [
+      "tasks",
+      "multiply",
+      "review"
+     ],
+     {
+      "verdict": "APPROVE",
+      "by": "team-codex",
+      "commit": "4f1c9ab",
+      "uncovered": [],
+      "ts": "NOW"
+     }
+    ]
+   ],
+   "event": {
+    "kind": "reviewed",
+    "task": "multiply",
+    "severity": "info",
+    "text": "multiply : APPROVE, 10 points présents"
+   }
+  },
+  {
+   "run": "WI-DEMO-001",
+   "set": [
+    [
+     [
+      "tasks",
+      "divide",
+      "review"
+     ],
+     {
+      "verdict": "APPROVE",
+      "by": "team-claude",
+      "commit": "8b27de0",
+      "uncovered": [
+       "Problèmes de sécurité"
+      ],
+      "ts": "NOW"
+     }
+    ],
+    [
+     [
+      "pipeline",
+      "review",
+      "state"
+     ],
+     "done"
+    ],
+    [
+     [
+      "pipeline",
+      "dry",
+      "state"
+     ],
+     "active"
+    ]
+   ],
+   "event": {
+    "kind": "reviewed",
+    "task": "divide",
+    "severity": "warning",
+    "text": "divide : APPROVE, 1 point de contrôle absent"
+   }
+  }
+ ]
+}

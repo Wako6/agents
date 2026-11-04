@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cockpit Project Manager</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="demo" role="note">DONNÉES FICTIVES · lecture seule · aucune commande ne peut être envoyée à <code>pmx</code></div>
+<header class="top">
+  <h1>Cockpit Project Manager</h1>
+  <label class="sel">Run
+    <select id="run"></select>
+  </label>
+  <div class="live" aria-live="polite"><span id="live-dot" class="dot"></span><span id="live-text">Connexion…</span></div>
+  <button id="cut" type="button">Simuler une coupure</button>
+</header>
+<nav id="tabs" aria-label="Vues"></nav>
+<div id="banner" role="status"></div>
+<main id="view"></main>
+<script src="/app.js"></script>
+</body>
+</html>
