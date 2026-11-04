@@ -35,7 +35,7 @@ DEFAULTS = {
 # Chemins qui exigent toujours une validation humaine (secrets, permissions, hooks/garde-fous, CI/production).
 SENSITIVE = [
     ("secret", [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*secret*", "*credential*", "*token*", ".npmrc", ".pypirc", ".netrc"]),
-    ("guardrail", [".claude/*", ".claude/**", ".git/*", ".git", "*/.git", "*/.git/*", ".gitattributes", ".gitmodules", ".githooks/*", ".husky/*", "hooks/*", "*/hooks/*", "*settings*.json", ".pre-commit-config.yaml", "CODEOWNERS", ".mcp.json", "ai_rules/*", ".claude/rules/*"]),
+    ("guardrail", [".claude/*", ".claude/**", ".git/*", ".git", "*/.git", "*/.git/*", ".gitattributes", ".gitmodules", ".githooks/*", ".husky/*", "hooks/*", "*/hooks/*", "*settings*.json", ".pre-commit-config.yaml", "CODEOWNERS", ".mcp.json", ".codex/*", ".codex/**", "ai_rules/*", ".claude/rules/*"]),
     ("production", [".gitlab-ci.yml", ".github/workflows/*", "deploy/*", "k8s/*", "helm/*", "terraform/*", "*.tf", "Dockerfile", "docker-compose*.yml"]),
 ]
 # Commandes de test : exécutées sans shell ; ces caractères signalent une tentative d'enchaînement ou de substitution.
@@ -690,6 +690,37 @@ def codex_package_dir():
     return p
 
 
+# Aucun outil MCP externe pour un agent lancé par pmx (développement, débat, revue), dans tous les modes. Ces outils tournent hors
+# du sandbox des CLI : ni `--tools`, ni le réseau du sandbox ne les retirent. Les connexions de l'utilisateur ne sont pas modifiées.
+CLAUDE_NO_MCP = ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disallowedTools=mcp__*"]
+CODEX_NO_EXTERNAL = ["--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin", "--disable", "tool_suggest",
+                     "--disable", "skill_mcp_dependency_install", "--disable", "hooks", "-c", 'web_search="disabled"']
+
+
+def codex_mcp_servers(cwd, overrides=()):
+    """Serveurs MCP vus par Codex depuis ce dossier → [(nom, actif)]. Noms seuls : le reste de la réponse n'est pas conservé."""
+    try:
+        p = subprocess.run(["codex", *overrides, "mcp", "list", "--json"], cwd=str(cwd), capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL, env=agent_env())
+        if p.returncode != 0:
+            die(f"Codex : liste des serveurs MCP impossible (code {p.returncode}) — aucun agent lancé", EXIT_USAGE)
+        return [(x["name"], x.get("enabled")) for x in json.loads(p.stdout)]
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as e:
+        die(f"Codex : liste des serveurs MCP illisible ({type(e).__name__}) — aucun agent lancé", EXIT_USAGE)
+
+
+def codex_no_mcp_args(cwd):
+    """Codex n'a pas d'équivalent de --strict-mcp-config et `-c mcp_servers={}` ne retire rien : chaque serveur est désactivé par
+    son nom, pour cet appel seulement, puis le résultat est relu. Le moindre doute refuse le lancement."""
+    names = [n for n, _on in codex_mcp_servers(cwd)]
+    if bad := [n for n in names if not re.fullmatch(r"[A-Za-z0-9_-]+", n)]:
+        die(f"Codex : nom de serveur MCP impossible à désactiver {bad!r} — aucun agent lancé", EXIT_USAGE)
+    args = [*CODEX_NO_EXTERNAL, *(x for n in names for x in ("-c", f"mcp_servers.{n}.enabled=false"))]
+    seen = codex_mcp_servers(cwd, args)
+    if {n for n, _on in seen} != set(names) or any(on is not False for _n, on in seen):
+        die(f"Codex : serveurs MCP encore actifs malgré la désactivation {[n for n, on in seen if on is not False]!r} — aucun agent lancé", EXIT_USAGE)
+    return args
+
+
 def codex_profile_args(mode):
     """Profil de permissions Codex (bêta, officiel) passé en ligne de commande : aucune lecture hors du worktree et des
     chemins système minimaux, aucune écriture hors du worktree, ni /tmp, ni réseau. ~/.codex n'est ni lu ni modifié."""
@@ -790,7 +821,7 @@ def require_confinement(ctx):
 AGENT_ENV_ALLOW = {"HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG", "LANGUAGE", "TERM", "TZ",
                    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
                    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE",
-                   "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "PYTHONDONTWRITEBYTECODE", "DISABLE_AUTOUPDATER"}
+                   "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "PYTHONDONTWRITEBYTECODE", "DISABLE_AUTOUPDATER", "ENABLE_CLAUDEAI_MCP_SERVERS"}
 AGENT_ENV_DENY = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|CREDENTIAL|PRIVATE|AWS|AZURE|GITHUB|GITLAB|SSH_AUTH|OAUTH|COOKIE|SESSION", re.I)
 
 
@@ -805,6 +836,7 @@ def agent_env():
             continue  # proxy avec identifiants : jamais transmis à un agent
         env[k] = v
     env["DISABLE_AUTOUPDATER"] = "1"  # un agent ne met jamais à jour l'installation globale de sa CLI pendant un run
+    env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"  # connecteurs du compte : voir CLAUDE_NO_MCP
     return env
 
 
@@ -814,9 +846,9 @@ def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):
     prompt = pathlib.Path(prompt_file).read_text(encoding="utf-8")
     if a == "codex-cli":
         if confined(ctx):  # profil de permissions : lectures limitées au worktree (remplace --sandbox, incompatible)
-            argv = ["codex", "exec", *codex_profile_args(mode), "--skip-git-repo-check", "--ephemeral", "-C", str(cwd), "-o", str(out_file)]
+            argv = ["codex", "exec", *codex_no_mcp_args(cwd), *codex_profile_args(mode), "--skip-git-repo-check", "--ephemeral", "-C", str(cwd), "-o", str(out_file)]
         else:
-            argv = ["codex", "exec", "--sandbox", "read-only" if mode == "read" else "workspace-write", "--skip-git-repo-check",
+            argv = ["codex", "exec", *codex_no_mcp_args(cwd), "--sandbox", "read-only" if mode == "read" else "workspace-write", "--skip-git-repo-check",
                     "--ephemeral", "-C", str(cwd), "-o", str(out_file),
                     # durcissement explicite du sandbox natif, indépendant de ~/.codex/config.toml (jamais lu ni modifié) :
                     # pas de réseau, et ni /tmp ni $TMPDIR inscriptibles — seul le worktree l'est
@@ -828,10 +860,11 @@ def agent_argv(ctx, acfg, prompt_file, out_file, cwd, mode):
     if a == "claude-cli":
         tools = "Read,Grep,Glob" if mode == "read" else "Read,Grep,Glob,Edit,Write" if confined_team_without_shell(ctx) else "Read,Grep,Glob,Edit,Write,Bash"
         argv = ["claude", "-p", prompt, "--output-format", "text", "--tools", tools,
-                "--permission-mode", "default" if mode == "read" else "acceptEdits"]
+                "--permission-mode", "default" if mode == "read" else "acceptEdits", *CLAUDE_NO_MCP]
         if confined(ctx):  # réglages générés pour cet appel, hors du worktree, à côté du prompt
             dest = pathlib.Path(prompt_file).with_name(pathlib.Path(prompt_file).name + ".claude-settings.json")
-            argv += ["--settings", str(claude_confined_settings(ctx, acfg, cwd, mode, dest))]
+            # sans réglages utilisateur ni projet : un hook du dépôt s'exécuterait hors du sandbox, et une règle `allow` s'y ajouterait
+            argv += ["--setting-sources", "", "--settings", str(claude_confined_settings(ctx, acfg, cwd, mode, dest))]
         elif acfg.get("settings"):  # politique pilote passée explicitement, jamais la config globale
             argv += ["--settings", str((ctx.root / acfg["settings"]).resolve())]
         if acfg.get("model"):
@@ -2530,8 +2563,11 @@ def cmd_verify(ctx, a):
 
 # ---------------------------------------------------------------- revue croisée (I2, lecture seule)
 
-REVIEW_PROMPT = """Tu es reviewer pour le pilote multi-agents (revue croisée entre équipes). LECTURE SEULE : tu ne modifies aucun fichier, tu ne corriges rien.
-Dépôt : {root}. Checkout détaché du commit revu (pour lire le code et lancer `{test}`) : {checkout}. Work item revu : {wi} — {title}. Produit par l'équipe {team} ; tu appartiens à l'autre équipe.
+REVIEW_POINTS = ("Conformité aux exigences", "Qualité de l'implémentation", "Cas limites et gestion des erreurs", "Pertinence et couverture des tests",
+                 "Risques de régression", "Problèmes de sécurité", "Respect du périmètre autorisé", "Cohérence avec le commit exact vérifié",
+                 "Dépendances et effets de bord", "Limites de ce qui a réellement été vérifié")
+REVIEW_PROMPT = """Tu es reviewer pour le pilote multi-agents (revue croisée entre équipes). LECTURE SEULE : tu ne modifies aucun fichier, tu ne corriges rien. N'utilise aucun outil externe.
+Dépôt : {root}. Checkout détaché du commit revu : {checkout}. Si tu disposes d'un shell, tu peux y lancer `{test}` ; sinon dis-le. Work item revu : {wi} — {title}. Produit par l'équipe {team} ; tu appartiens à l'autre équipe.
 Décision d'architecture à respecter : {decision}
 Critères d'acceptation : {acceptance}
 Périmètre autorisé : {files}
@@ -2541,9 +2577,21 @@ Diff (base..commit {commit}) :
 {diff}
 ```
 
-Rends : constats classés Blocker / Major / Minor / Trivial (fichier:ligne, problème, risque, suggestion), puis le respect de chaque critère d'acceptation.
+Rends :
+1. Les constats classés Blocker / Major / Minor / Trivial (fichier:ligne, problème, risque, suggestion).
+2. Le respect de chaque critère d'acceptation.
+3. Une section `## Contrôles` avec exactement ces points numérotés, chacun marqué `VÉRIFIÉ` (dis comment : fichiers lus, commande lancée et son résultat) ou `NON VÉRIFIÉ` (dis pourquoi) :
+{points}
+
+N'affirme que ce que tu as réellement fait : une lecture n'est pas une exécution, et un point non examiné se marque `NON VÉRIFIÉ`. Un `NON VÉRIFIÉ` n'est pas un défaut en soi : il ne devient un Blocker ou un Major que s'il masque un risque que tu sais nommer.
 Termine SEULE sur la dernière ligne par exactement : `VERDICT: APPROVE` ou `VERDICT: CHANGES_REQUESTED` (CHANGES_REQUESTED seulement s'il existe un Blocker ou un Major).
 """
+
+
+def review_uncovered(text):
+    """Points de contrôle absents d'un rapport. Signalés, sans changer le verdict du relecteur."""
+    done = {int(n) for n in re.findall(r"^\W*(\d+)\b.*(?:NON VÉRIFIÉ|VÉRIFIÉ)", text, re.M)}
+    return [p for i, p in enumerate(REVIEW_POINTS, 1) if i not in done]
 
 
 def cmd_review(ctx, a):
@@ -2567,7 +2615,8 @@ def cmd_review(ctx, a):
         if not cdir.exists():
             git(ctx.root, "worktree", "add", "-q", "--detach", str(cdir), t["commit"])
         write_atomic(pf, REVIEW_PROMPT.format(root=ctx.root, checkout=cdir, test=t["test_command"], wi=t["wi"], title=t["title"], team=t["team"], decision=st["decision"]["text"],
-                                              acceptance=json.dumps(t["acceptance"], ensure_ascii=False), files=t["files"], commit=t["commit"][:10], diff=diff))
+                                              acceptance=json.dumps(t["acceptance"], ensure_ascii=False), files=t["files"], commit=t["commit"][:10], diff=diff,
+                                              points="\n".join(f"{i}. {x}" for i, x in enumerate(REVIEW_POINTS, 1))))
         ctx.event(a.run, "review_requested", task=key, reviewer=reviewer, adapter=acfg.get("adapter"))
         rc = run_tracked_agent(ctx, a.run, "review", key, acfg, pf, of, cdir, rdir / "agents.log", ctx.o["team_timeout_s"])
         if rc is None:
@@ -2592,14 +2641,17 @@ def _record_review(ctx, run, key, text, source):
         n = len(list((ctx.root / "ai_doc" / "reviews").glob(f"PEER__{t['wi']}__*.md"))) + 1 if (ctx.root / "ai_doc" / "reviews").exists() else 1
         rel = pathlib.Path("ai_doc") / "reviews" / f"PEER__{t['wi']}__{n}.md"
         write_atomic(ctx.root / rel, f"# Peer review — {t['wi']} — {t['title']}\n\nReviewer: {source} · Commit: {t['commit']} · Date: {now()} · Verdict: **{verdict}**\n\n{text.strip()}\n")
-        t["review"] = {"verdict": verdict, "by": source, "commit": t["commit"], "file": str(rel), "ts": now()}
+        uncovered = review_uncovered(text)
+        t["review"] = {"verdict": verdict, "by": source, "commit": t["commit"], "file": str(rel), "ts": now(), "uncovered": uncovered}
         ctx.save_run(st)
     cdir = ctx.wt_root / f"_review-{key}-{t['commit'][:8]}"
     if cdir.exists():  # checkout propre créé par pmx ; non forcé : s'il a été modifié, il reste et c'est signalé
         rm = subprocess.run([*GIT_SAFE, "-C", str(ctx.root), "worktree", "remove", str(cdir)], capture_output=True, text=True, env=git_env())
         if rm.returncode != 0:
             print(f"  ⚠ checkout de revue modifié, conservé : {cdir}")
-    ctx.event(run, "reviewed", task=key, verdict=verdict, by=source)
+    ctx.event(run, "reviewed", task=key, verdict=verdict, by=source, uncovered=uncovered)
+    if uncovered:
+        print(f"  ⚠ {key} : points de contrôle absents du rapport : {uncovered}")
     print(f"  {'✔' if verdict == 'APPROVE' else '⚠'} {key} : revue {verdict} ({source}) → {rel}  — triage manager (review-triage.md)")
     return EXIT_OK if verdict == "APPROVE" else EXIT_HUMAN
 

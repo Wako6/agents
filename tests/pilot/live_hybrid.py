@@ -377,6 +377,8 @@ def scenario_a(base):
     helpers, atts = fin.get("helpers") or [], [x for t in fin["tasks"].values() for x in t["attempts"]]
     check("A", "agents réels de débat et de revue suivis dans un cgroup, terminés et vérifiés", len({h["kind"] for h in helpers}) == 2
           and all(h["ended"] and not pathlib.Path("/sys/fs/cgroup" + h["cgroup"]).exists() for h in helpers), [(h["kind"], h["key"], h["ended"]) for h in helpers])
+    rev = {k: t["review"].get("uncovered") for k, t in fin["tasks"].items()}
+    check("A", "revues réelles : les 10 points de contrôle sont présents", all(v == [] for v in rev.values()), rev)
     check("A", "fin normale des deux équipes vérifiée, sans arrêt critique", all(x.get("settled") in ("vérifiée", "descendants arrêtés") for x in atts) and "stop" not in fin, [x.get("settled") for x in atts])
     out["human_integrate_command"] = f"python3 -I {PMX} --root {root} integrate --run {run} --approved-by <votre-nom>"
     return out

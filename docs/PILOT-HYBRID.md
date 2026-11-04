@@ -53,6 +53,29 @@ Conséquence fonctionnelle : l'équipe Claude ne peut pas lancer de tests, de li
 
 Ce retrait ne concerne que `orchestration.mode = "host-agents+docker-verification"` avec `confinement = "native"`. Le mode par défaut, même avec `confinement = "native"`, garde `Bash`.
 
+### Restriction des outils MCP externes pour les agents
+
+Les outils MCP et les connecteurs liés aux comptes tournent **hors du sandbox** des CLI. `--tools` et le réseau du sandbox ne les retirent pas. Dans tous les modes, `pmx` applique à chaque agent de développement, de débat ou de revue, pour cet appel seulement, les restrictions ci-dessous ; les connexions de l'utilisateur ne sont pas modifiées. Les résultats obtenus ne constituent pas une garantie d'isolation complète.
+
+- **Claude Code :** `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, `--disallowedTools=mcp__*` et `ENABLE_CLAUDEAI_MCP_SERVERS=false`. En confinement natif, `--setting-sources ""` écarte aussi les réglages utilisateur et projet : un hook du dépôt s'exécuterait hors du sandbox.
+- **Codex :** pas d'équivalent de `--strict-mcp-config`, et `-c mcp_servers={}` ne retire rien. `pmx` liste les serveurs (`codex mcp list --json`) depuis le dossier de l'agent, désactive chacun par son nom, relit le résultat, et **refuse le lancement** au moindre doute. Il coupe aussi `apps`, `plugins`, `remote_plugin`, `tool_suggest`, `skill_mcp_dependency_install`, `hooks` et la recherche web.
+
+Scénarios de validation réels : `tests/pilot/live_mcp.py`.
+
+Limites acceptées pour un pilote non sensible, qui ne sont pas des garanties démontrées :
+
+1. **Connecteurs Codex :** la désactivation de `apps` n'a pas été mesurée avec un connecteur réellement actif. Elle repose sur la documentation de Codex.
+2. **Hooks Codex :** `--disable hooks` n'a pas été testé avec un hook réel.
+3. **Projet Codex approuvé :** ce cas n'a pas été testé en réel.
+4. **Liste d'outils Codex :** elle vient de ce que l'agent déclare et peut être incomplète. Les preuves mesurées sont l'absence de processus serveur et l'échec de l'appel.
+5. **Sous-agents :** l'héritage des restrictions par un sous-agent n'a pas été mesuré.
+6. **Réglages administrés :** les réglages gérés par une organisation n'ont pas été testés.
+7. **Versions :** les résultats valent pour Claude Code 2.1.317 et Codex 0.162.1. Après une mise à jour d'une CLI, `live_mcp.py` est à relancer.
+8. **Claude hors confinement natif :** les réglages utilisateur restent chargés, hooks compris.
+9. **Outils Codex conservés :** la génération d'images, qui est distante, et les outils de collaboration restent présents.
+
+Effets à connaître : `pmx` applique aux agents les restrictions MCP décrites ci-dessus, sans politique d'exception pour le moment. Ces restrictions ont été validées sur les surfaces testées et ne constituent pas une garantie d'isolation complète. En profil hybride, les réglages utilisateur et projet de Claude sont ignorés ; un nom de serveur Codex hors `[A-Za-z0-9_-]` ou une liste illisible refuse le lancement.
+
 ### Arrêt critique vérifié
 
 `pmx` lance chaque tentative dans son propre scope systemd utilisateur (`systemd-run --user --scope`), sans privilège ni changement de configuration, donc dans son propre cgroup v2. Le nom du scope est tiré au hasard. Un descendant reste dans le cgroup même s'il change de groupe de processus ou de session, et l'identité ne dépend plus d'un PID. Ce suivi est **obligatoire en profil hybride** : sans lui, aucun agent n'est lancé.
