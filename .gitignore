@@ -14,6 +14,17 @@
 !/templates/
 !/adapters/
 !/tests/
+!/cockpit/
+/cockpit/*
+!/cockpit/server.py
+!/cockpit/fixtures/
+/cockpit/fixtures/*
+!/cockpit/fixtures/demo.json
+!/cockpit/ui/
+/cockpit/ui/*
+!/cockpit/ui/index.html
+!/cockpit/ui/app.js
+!/cockpit/ui/app.css
 !/optional-agents/
 
 !/skills/
