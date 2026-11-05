@@ -14,7 +14,7 @@ LABEL.IN_PROGRESS_STOP = ["Arrêt interrompu","bad"];
 const $ = id => document.getElementById(id);
 const el = (tag, cls, ...kids) => { const n = document.createElement(tag); if (cls) n.className = cls;
   for (const k of kids) if (k !== null && k !== undefined) n.append(k.nodeType ? k : String(k)); return n; };
-let snap = null, runId = null, es = null, cut = false, lastSeen = null, lost = null;
+let snap = null, runId = null, es = null, cut = false, lastSeen = null, live = CockpitLive.initial(), lastMsg = 0, retry = null, runGone = null;
 
 function tag(st, ctx) {
   if (!st) return el("span","tag unk","Inconnu");
@@ -38,9 +38,9 @@ const freshness = r => { const a = age(r.observed_at); return a === null || a > 
 
 const render = {
   projects(){ const g = el("div","grid");
-    snap.projects.forEach(p => { const runs = p.runs.map(r => { const c = r.tasks||[]; const open = c.filter(t=>t.status&&!["DONE"].includes(t.status.value)).length;
+    snap.projects.forEach(p => { const runs = p.runs.map(r => { const c = r.tasks||[]; const unknown = c.filter(t=>!t.status||t.status.value==="UNKNOWN").length; const open = c.filter(t=>t.status&&t.status.value!=="UNKNOWN"&&t.status.value!=="DONE").length;
         const stop = r.security&&r.security.stop&&r.security.stop.state;
-        return el("p",null, el("a",null,r.id), " ", stop?tag(stop,"stop"):null, " ", el("span","muted", open+" tâche(s) ouverte(s), observé il y a "+ago(r.observed_at))); });
+        return el("p",null, el("a",null,r.id), " ", stop?tag(stop,"stop"):null, " ", el("span","muted", open+" tâche(s) ouverte(s)"+(unknown?", "+unknown+" d'état inconnu":"")+", observé il y a "+ago(r.observed_at))); });
       runs.forEach(n=>{const a=n.querySelector("a"); const id=a.textContent; a.href="#tasks"; a.addEventListener("click",()=>{runId=id;$("run").value=id;});});
       g.append(el("section","card", el("h3",null,p.name), kv([["Registre",p.backend],["Mode",p.mode],["Source",tag(p.source)],["Profil",(p.profile||"aucun")+(p.profile_active?"":" (non activé)")]]), ...runs)); });
     return [el("p","sub","Vue d'ensemble. Le cockpit lit des fichiers ; il n'interroge aucun agent et ne lance rien."),g]; },
@@ -61,30 +61,43 @@ const render = {
 };
 
 function banner(c){ const b = $("banner"); b.className = ""; b.textContent = ""; const msgs = [];
-  if (lost) msgs.push(["Flux coupé depuis "+hm(lost)+". Les données affichées datent de "+(lastSeen?hm(lastSeen):"inconnu")+". Reconnexion en cours.","bad"]);
+  if (live.phase==="expired") msgs.push(["Session perdue : rouvrez l'adresse affichée au lancement du serveur. Les données affichées datent de "+(lastSeen?hm(lastSeen):"inconnu")+".","bad"]);
+  else if (live.lostAt) msgs.push(["Flux coupé depuis "+hm(live.lostAt)+". Les données affichées datent de "+(lastSeen?hm(lastSeen):"inconnu")+". Reconnexion en cours.","bad"]);
+  else if (live.phase==="stale") msgs.push(["Flux ouvert, mais instantané indisponible. Les données affichées datent de "+(lastSeen?hm(lastSeen):"inconnu")+".","bad"]);
+  if (live.loss && Date.now()-new Date(live.loss.at) < 300000) msgs.push(["Continuité perdue à "+hm(live.loss.at)+" : "+live.loss.why+". Instantané complet rechargé ; des événements intermédiaires peuvent manquer à l'affichage.","bad"]);
+  if (runGone) msgs.push(["Le run "+runGone+" n'existe plus dans la source : un autre run est affiché.","warn"]);
+  if (snap&&snap.source_state&&snap.source_state.value!=="OK") msgs.push(["Source "+(snap.source_state.value==="UNREADABLE"?"illisible":"partielle")+" : "+(snap.source_note||"")+"",snap.source_state.value==="UNREADABLE"?"bad":"warn"]);
   if (c) { const r = c.r; const v = r.source&&r.source.value;
     if (v==="UNREADABLE") msgs.push(["Source illisible : "+(r.source_note||"")+" États affichés comme inconnus.","bad"]);
     else if (v==="PARTIAL") msgs.push(["Source partielle : "+(r.source_note||""),"warn"]);
     if (r.security&&r.security.stop&&r.security.stop.state&&["UNRESOLVED","IN_PROGRESS"].includes(r.security.stop.state.value)) msgs.push(["Arrêt critique non prouvé : aucune équipe ne repart, rien ne s'intègre. Vérifiez les processus dans la vue Sécurité.","bad"]);
-    if (freshness(r) && !lost) msgs.push(["Aucune observation depuis "+ago(r.observed_at)+" : cet état peut être dépassé.","warn"]); }
+    if (freshness(r) && !live.lostAt) msgs.push(["Aucune observation depuis "+ago(r.observed_at)+" : cet état peut être dépassé.","warn"]); }
   if (msgs.length) { b.textContent = msgs.map(m=>m[0]).join(" "); if (msgs.some(m=>m[1]==="bad")) b.className = "bad"; } }
 
 function draw(){ const hash = (location.hash||"#projects").slice(1); const view = VIEWS.some(v=>v[0]===hash)?hash:"projects";
   $("tabs").replaceChildren(...VIEWS.map(([k,l])=>{const a=el("a",null,l);a.href="#"+k;if(k===view)a.setAttribute("aria-current","page");return a;}));
-  if (!snap) return; const c = cur(); banner(c);
+  if (!snap) return; $("origin").textContent = snap.source==="copies" ? "COPIES MINIMISÉES DE RUNS" : snap.source==="demo" ? "DONNÉES FICTIVES" : "SOURCE INCONNUE";
+  if (runId && !allRuns().some(x=>x.r.id===runId)) { runGone = runId; runId = null; } const c = cur(); banner(c);
   const sel = $("run"); const opts = allRuns().map(x=>x.r.id); if ([...sel.options].map(o=>o.value).join()!==opts.join()) sel.replaceChildren(...allRuns().map(x=>{const o=el("option",null,x.p.name+" · "+x.r.id);o.value=x.r.id;return o;}));
   if (c) { runId=c.r.id; sel.value=runId; }
   const head = view!=="projects"&&c ? [el("h2","runtitle",c.r.title||c.r.id)] : [];
   $("view").replaceChildren(...head,...(view==="projects"?render.projects():c?render[view](c.r):[el("p","muted","Aucun run.")])); }
 
-function status(on,text){ $("live-dot").className="dot "+(on?"on":"off"); $("live-text").textContent=text; }
-async function load(){ const res = await fetch("/api/v1/snapshot",{cache:"no-store"}); if(!res.ok) throw new Error(res.status); snap = await res.json(); lastSeen = new Date().toISOString(); draw(); }
-function connect(){ if (es) es.close(); es = new EventSource("/api/v1/stream");
-  es.addEventListener("hello", async e => { const h = JSON.parse(e.data); lost=null; status(true,"En direct"); if (!snap||h.resync||snap.instance!==h.instance||snap.seq!==h.seq) { try{ await load(); }catch{ status(false,"Instantané indisponible"); } } else draw(); });
-  es.addEventListener("update", async () => { try{ await load(); }catch{ status(false,"Instantané indisponible"); } });
-  es.onerror = () => { if(!lost) lost=new Date().toISOString(); status(false,"Hors ligne, reconnexion"); draw(); }; }
+const PHASES = {connecting:[false,"Connexion…"],resync:[false,"Resynchronisation…"],resync_replay:[false,"Resynchronisation…"],live:[true,"En direct"],offline:[false,"Hors ligne, reconnexion"],stale:[false,"Instantané indisponible"],expired:[false,"Session perdue"]};
+function show(){ const [on,text] = PHASES[live.phase]||[false,"Inconnu"]; $("live-dot").className="dot "+(on?"on":"off"); $("live-text").textContent=text; }
+function step(ev){ const r = CockpitLive.reduce(live,{at:new Date().toISOString(),...ev}); live = r.state; show(); if (r.load) load(); else draw(); }
+const snapshot = () => fetch("/api/v1/snapshot",{cache:"no-store"});
+async function load(){ try { const res = await snapshot();
+    if (!res.ok) return step({type:"snapshot_failed",expired:res.status===401||res.status===403});
+    snap = await res.json(); lastSeen = new Date().toISOString(); step({type:"snapshot",instance:snap.instance,seq:snap.seq});
+  } catch { step({type:"snapshot_failed",expired:false}); } }
+const on = (name,type) => es.addEventListener(name, e => { lastMsg = Date.now(); step({type,...JSON.parse(e.data)}); });
+function connect(){ clearTimeout(retry); if (es) es.close(); es = new EventSource("/api/v1/stream"); on("hello","hello"); on("update","update"); on("lost","lost"); on("ping","ping");
+  es.onerror = () => { step({type:"error"}); if (es.readyState===EventSource.CLOSED && !cut) { // refus définitif : session perdue, ou serveur absent
+      snapshot().then(r=>{ if (r.status===401||r.status===403) step({type:"expired"}); else retry=setTimeout(connect,3000); }).catch(()=>{ retry=setTimeout(connect,3000); }); } }; }
+$("cut").addEventListener("click",()=>{ cut=!cut; $("cut").textContent=cut?"Rétablir le flux":"Simuler une coupure"; if(cut){ es.close(); clearTimeout(retry); step({type:"error"}); } else connect(); });
+setInterval(()=>{ if (!cut && live.heartbeat && live.phase!=="expired" && lastMsg && Date.now()-lastMsg > live.heartbeat*3000) { lastMsg=Date.now(); step({type:"silent"}); connect(); } },1000);
 $("run").addEventListener("change",e=>{runId=e.target.value;draw();});
-$("cut").addEventListener("click",()=>{ cut=!cut; $("cut").textContent=cut?"Rétablir le flux":"Simuler une coupure"; if(cut){es.close();lost=new Date().toISOString();status(false,"Hors ligne (simulé)");draw();} else {connect();} });
 addEventListener("hashchange",draw);
 setInterval(()=>{ if(snap&&!$("view").contains(document.activeElement)) draw(); },15000);
-draw(); connect();
+show(); draw(); connect();

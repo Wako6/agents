@@ -17,6 +17,8 @@
 !/cockpit/
 /cockpit/*
 !/cockpit/server.py
+!/cockpit/adapter.py
+!/cockpit/extract.py
 !/cockpit/fixtures/
 /cockpit/fixtures/*
 !/cockpit/fixtures/demo.json
@@ -25,6 +27,7 @@
 !/cockpit/ui/index.html
 !/cockpit/ui/app.js
 !/cockpit/ui/app.css
+!/cockpit/ui/live.js
 !/optional-agents/
 
 !/skills/

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Cockpit Project Manager V3.3 — prototype en lecture seule, sur données FICTIVES.
+"""Cockpit Project Manager V3.3 — prototype en lecture seule, sur données FICTIVES ou sur des COPIES minimisées de runs.
 
-    python3 -I -B cockpit/server.py [--port 8765]
+    python3 -I -B cockpit/server.py [--port 8765] [--copies <dossier hors dépôt>]
 
 Sécurité du prototype : écoute sur 127.0.0.1 uniquement, GET et HEAD uniquement, jeton de session, contrôle de Host et d'Origin,
 aucune ressource externe, sortie filtrée par liste d'autorisation. Il n'importe pas pmx, ne lance aucun processus et ne lit que
-fixtures/demo.json et les fichiers de ui/. Aucun chemin n'est construit à partir d'une requête.
+fixtures/demo.json, les fichiers de ui/ et, avec --copies, les copies validées par adapter.py. Aucun chemin n'est construit à partir
+d'une requête.
 """
-import argparse, copy, datetime, hmac, http.cookies, http.server, ipaddress, json, pathlib, re, secrets, socketserver, sys, threading, time, urllib.parse
+import argparse, collections, copy, datetime, hmac, http.cookies, http.server, importlib.util, ipaddress, json, pathlib, re, secrets, socketserver, sys, threading, time, urllib.parse
 
 HERE = pathlib.Path(__file__).resolve().parent
 SCHEMA = "pm-cockpit/1"
-STATIC = {"/": ("ui/index.html", "text/html; charset=utf-8"), "/app.js": ("ui/app.js", "text/javascript; charset=utf-8"), "/app.css": ("ui/app.css", "text/css; charset=utf-8")}
+STATIC = {"/": ("ui/index.html", "text/html; charset=utf-8"), "/app.js": ("ui/app.js", "text/javascript; charset=utf-8"), "/app.css": ("ui/app.css", "text/css; charset=utf-8"), "/live.js": ("ui/live.js", "text/javascript; charset=utf-8")}
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 HEADERS = {"Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Cache-Control": "no-store"}
 VIEWS = ("projects", "teams", "tasks", "pipeline", "decisions", "security")
@@ -42,7 +43,7 @@ RUN = {"id": "text", "title": "text", "parent_wi": "text", "created": "ts", "upd
                     "items": [{"label": "text", "value": "text", "proof": ("proof",), "note": "text"}]},
        "events": [{"seq": "int", "ts": "ts", "kind": "text", "task": "text", "severity": ("severity",), "text": "text"}]}
 PROJECT = {"id": "text", "name": "text", "backend": "text", "mode": "text", "profile": "text", "profile_active": "bool", "source": ("source",), "runs": [RUN]}
-SNAPSHOT = {"schema": "text", "source": "text", "read_only": "bool", "instance": "text", "seq": "int", "generated": "ts", "projects": [PROJECT]}
+SNAPSHOT = {"schema": "text", "source": "text", "source_state": ("source",), "source_note": "text", "read_only": "bool", "instance": "text", "seq": "int", "generated": "ts", "projects": [PROJECT]}
 
 # Dernier filet, jamais la protection principale : un champ autorisé peut contenir une valeur inattendue.
 MASKS = [(re.compile(p), r) for p, r in (
@@ -96,13 +97,35 @@ def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-class Demo:
-    """État fictif rejoué en boucle : chaque étape applique des valeurs et ajoute un événement, avec un numéro de séquence croissant."""
+class Feed:
+    """Journal des mises à jour : numéro de séquence croissant et mémoire bornée, pour rejouer ou, à défaut, dire que la continuité est perdue."""
+
+    def __init__(self):
+        self.instance, self.cond, self.seq, self.ring = secrets.token_hex(4), threading.Condition(), 0, collections.deque(maxlen=256)
+
+    def publish(self, update):
+        self.seq += 1
+        update = {**update, "seq": self.seq}
+        self.ring.append(update)
+        self.cond.notify_all()
+
+    def since(self, seq):
+        """Mises à jour après `seq`, ou None si la mémoire ne permet plus de les fournir toutes."""
+        if seq == self.seq:
+            return []
+        if seq > self.seq or (self.ring and seq < self.ring[0]["seq"] - 1) or (not self.ring and seq != self.seq):
+            return None
+        return [u for u in self.ring if u["seq"] > seq]
+
+
+class Demo(Feed):
+    """État fictif rejoué en boucle : chaque étape applique des valeurs et ajoute un événement."""
+    source = "demo"
 
     def __init__(self, path, tick):
+        super().__init__()
         raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-        self.base, self.timeline, self.tick = raw["projects"], raw["timeline"], tick
-        self.instance, self.cond, self.seq = secrets.token_hex(4), threading.Condition(), 0
+        self.base, self.timeline, self.tick, self.event_seq = raw["projects"], raw["timeline"], tick, 0
         self.reset()
         self.stop = threading.Event()
         threading.Thread(target=self.loop, daemon=True).start()
@@ -112,8 +135,8 @@ class Demo:
         for p in self.projects:
             for r in p["runs"]:
                 for e in r.get("events", []):
-                    self.seq += 1
-                    e["seq"] = self.seq
+                    self.event_seq += 1
+                    e["seq"] = self.event_seq
 
     def find(self, run):
         return next((r for p in self.projects for r in p["runs"] if r["id"] == run), None)
@@ -127,25 +150,74 @@ class Demo:
             node[path[-1]] = {k: now_iso() if v == "NOW" else v for k, v in value.items()} if isinstance(value, dict) else value
         for key in ("updated", "observed_at"):
             r[key] = now_iso()
-        self.seq += 1
-        ev = {"seq": self.seq, "ts": now_iso(), **step["event"]}
+        self.event_seq += 1
+        ev = {"seq": self.event_seq, "ts": now_iso(), **step["event"]}
         r["events"].append(ev)
-        return {"run": r["id"], "seq": self.seq, "event": project(ev, RUN["events"][0])}
+        return {"run": r["id"], "event": project(ev, RUN["events"][0])}
 
     def loop(self):
         while not self.stop.wait(self.tick):
             with self.cond:
                 if self.step >= len(self.timeline):
                     self.reset()
-                    self.last = {"reset": True, "seq": self.seq}
+                    self.publish({"reset": True})
                 else:
-                    self.last = self.apply(self.timeline[self.step])
+                    update = self.apply(self.timeline[self.step])
                     self.step += 1
-                self.cond.notify_all()
+                    self.publish(update)
 
     def snapshot(self):
         with self.cond:
-            return project({"schema": SCHEMA, "source": "demo", "read_only": True, "instance": self.instance, "seq": self.seq, "generated": now_iso(), "projects": self.projects}, SNAPSHOT)
+            return project({"schema": SCHEMA, "source": self.source, "source_state": "OK", "read_only": True, "instance": self.instance, "seq": self.seq, "generated": now_iso(), "projects": self.projects}, SNAPSHOT)
+
+
+class Copies(Feed):
+    """Copies minimisées, relues périodiquement. Le serveur ne reçoit que ce que l'adaptateur a validé."""
+    source = "copies"
+
+    def __init__(self, root, tick):
+        super().__init__()
+        spec = importlib.util.spec_from_file_location("cockpit_adapter", HERE / "adapter.py")
+        sys.dont_write_bytecode = True
+        self.adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.adapter)
+        self.root, self.tick, self.forbidden = root, tick, (HERE.parent,)
+        self.projects, self.state, self.note, self.digest = [], "UNREADABLE", "Copies non encore lues.", None
+        self.adapter.check_root(root, self.forbidden)  # un mauvais dossier arrête le lancement, sans repli
+        self.refresh()
+        self.stop = threading.Event()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def refresh(self):
+        """Une modification, une disparition ou un refus deviennent une mise à jour visible. Le dernier état valide n'est jamais présenté comme actuel."""
+        try:
+            projects, refused = self.adapter.load_dir(self.root, self.forbidden)
+            state = "PARTIAL" if refused else "OK"
+            note = f"{len(refused)} fichier(s) refusé(s) : {', '.join(sorted(set(refused)))}." if refused else None
+        except (self.adapter.Refused, OSError) as e:
+            projects, state, note = [], "UNREADABLE", f"Dossier des copies illisible : {e if isinstance(e, self.adapter.Refused) else type(e).__name__}."
+        digest = json.dumps([projects, state, note], sort_keys=True, default=str)
+        with self.cond:
+            if digest == self.digest:
+                return
+            old = {r["id"]: {e["seq"] for e in r["events"]} for p in self.projects for r in p["runs"]}
+            first = self.digest is None
+            self.projects, self.state, self.note, self.digest = projects, state, note, digest
+            if first:
+                return
+            news = [(r["id"], e) for p in projects for r in p["runs"] for e in r["events"] if e["seq"] not in old.get(r["id"], set())]
+            for rid, e in news[:200]:
+                self.publish({"run": rid, "event": project(e, RUN["events"][0])})
+            if not news:
+                self.publish({"changed": True})
+
+    def loop(self):
+        while not self.stop.wait(self.tick):
+            self.refresh()
+
+    def snapshot(self):
+        with self.cond:
+            return project({"schema": SCHEMA, "source": self.source, "source_state": self.state, "source_note": self.note, "read_only": True, "instance": self.instance, "seq": self.seq, "generated": now_iso(), "projects": self.projects}, SNAPSHOT)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -226,19 +298,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             def emit(kind, data, ident=None):
                 self.wfile.write((f"id: {ident}\n" if ident is not None else "").encode() + f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode())
                 self.wfile.flush()
-            # Reprise : le client compare toujours instance et seq ; un numéro inconnu ou plus ancien impose un nouvel instantané.
-            last = self.headers.get("Last-Event-ID", "")
-            emit("hello", {"instance": demo.instance, "seq": demo.seq, "resync": last != f"{demo.instance}:{demo.seq}"}, f"{demo.instance}:{demo.seq}")
+            # Reprise : on rejoue ce qui manque si c'est encore possible. Sinon, resync dit au client que la continuité est perdue.
+            mine, _, last = self.headers.get("Last-Event-ID", "").partition(":")
+            with demo.cond:
+                sent = demo.seq
+                missed = demo.since(int(last)) if mine == demo.instance and last.isdigit() else None
+            emit("hello", {"instance": demo.instance, "seq": sent, "resync": missed is None, "heartbeat": self.server.heartbeat}, f"{demo.instance}:{sent}")
+            for u in missed or []:
+                emit("update", u, f"{demo.instance}:{u['seq']}")
             while not self.server.closing:
                 with demo.cond:
-                    known = demo.seq
-                    demo.cond.wait(self.server.heartbeat)
-                    update = getattr(demo, "last", None) if demo.seq != known else None
-                if update:
-                    emit("update", update, f"{demo.instance}:{update['seq']}")
+                    if demo.seq == sent:
+                        demo.cond.wait(self.server.heartbeat)
+                    batch = demo.since(sent)
+                    head = demo.seq
+                if batch is None:
+                    emit("lost", {"seq": head}, f"{demo.instance}:{head}")
+                elif batch:
+                    for u in batch:
+                        emit("update", u, f"{demo.instance}:{u['seq']}")
                 else:
-                    self.wfile.write(b": battement\n\n")
-                    self.wfile.flush()
+                    emit("ping", {"seq": head})  # visible du client : un flux muet se détecte, un commentaire SSE ne se verrait pas
+                sent = head
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
         finally:
@@ -249,11 +330,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
-    def __init__(self, host, port, fixture=HERE / "fixtures" / "demo.json", tick=4.0, heartbeat=10.0):
+    def __init__(self, host, port, fixture=HERE / "fixtures" / "demo.json", tick=4.0, heartbeat=10.0, copies=None):
         if not ipaddress.ip_address(host).is_loopback:
             raise SystemExit(f"refus : {host} n'est pas une adresse de boucle locale")
         super().__init__((host, port), Handler)
-        self.token, self.demo, self.closing, self.heartbeat = secrets.token_urlsafe(32), Demo(fixture, tick), False, heartbeat
+        self.token, self.demo, self.closing, self.heartbeat = secrets.token_urlsafe(32), Copies(copies, min(tick, 2.0)) if copies else Demo(fixture, tick), False, heartbeat
         self.slots, self.slots_lock = MAX_STREAMS, threading.Lock()
 
     def close_all(self):
@@ -268,9 +349,10 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--copies", help="dossier de copies minimisées, hors du dépôt")
     a = ap.parse_args()
-    srv = Server("127.0.0.1", a.port)
-    print(f"Cockpit (DONNÉES FICTIVES, lecture seule) : http://127.0.0.1:{srv.server_port}/auth?t={srv.token}\nCtrl-C pour arrêter.", flush=True)
+    srv = Server("127.0.0.1", a.port, copies=a.copies)
+    print(f"Cockpit ({'COPIES MINIMISÉES' if a.copies else 'DONNÉES FICTIVES'}, lecture seule) : http://127.0.0.1:{srv.server_port}/auth?t={srv.token}\nCtrl-C pour arrêter.", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
